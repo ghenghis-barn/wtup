@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+role="${1:-}"
+if [[ -z "$role" ]]; then
+  echo "usage: wtup-pane <backend|frontend|storybook>" >&2
+  exit 2
+fi
+
+slugify() {
+  local input="$1"
+  printf '%s' "$input" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9.]+/-/g; s/^-+//; s/-+$//; s/\.+/./g; s/^\.+//; s/\.+$//'
+}
+
+wt_name="${WORKTREE_NAME:-${ZELLIJ_SESSION_NAME:-worktree}}"
+wt_host="${WORKTREE_HOST:-}"
+if [[ -z "$wt_host" ]]; then
+  wt_host="$(slugify "$wt_name")"
+fi
+
+if [[ -z "$wt_host" ]]; then
+  echo "wtup-pane: could not derive WORKTREE_HOST" >&2
+  exit 1
+fi
+
+# Resolve portless URL components for per-worktree origins
+proxy_port="${PORTLESS_PORT:-}"
+if [[ -z "$proxy_port" ]]; then
+  if [[ -f "$HOME/.portless/proxy.port" ]]; then
+    proxy_port="$(tr -d '\r\n' < "$HOME/.portless/proxy.port" || true)"
+  elif [[ -f "/tmp/portless/proxy.port" ]]; then
+    proxy_port="$(tr -d '\r\n' < "/tmp/portless/proxy.port" || true)"
+  else
+    proxy_port="1355"
+  fi
+fi
+if ! [[ "$proxy_port" =~ ^[0-9]+$ ]]; then
+  proxy_port="1355"
+fi
+
+tls=0
+if [[ "${PORTLESS_HTTPS:-}" == "1" ]] || [[ "${PORTLESS_HTTPS:-}" == "true" ]]; then
+  tls=1
+fi
+if [[ -f "$HOME/.portless/proxy.tls" ]] || [[ -f "/tmp/portless/proxy.tls" ]]; then
+  tls=1
+fi
+
+proto="http"
+default_port="80"
+if [[ "$tls" == "1" ]]; then
+  proto="https"
+  default_port="443"
+fi
+
+fmt_origin() {
+  local host="$1"
+  if [[ "$proxy_port" == "$default_port" ]]; then
+    printf '%s://%s' "$proto" "$host"
+  else
+    printf '%s://%s:%s' "$proto" "$host" "$proxy_port"
+  fi
+}
+
+frontend_origin="$(fmt_origin "${wt_host}.localhost")"
+backend_origin="$(fmt_origin "flexplorer-api.${wt_host}.localhost")"
+storybook_origin="$(fmt_origin "storybook.${wt_host}.localhost")"
+
+case "$role" in
+  backend)
+    # Backend bootstrap for clean worktrees:
+    # - ensure venv
+    # - install requirements
+    if command -v git >/dev/null 2>&1; then
+      repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -n "$repo_root" ]] && [[ -d "$repo_root/services/flexplorer-api/backend" ]]; then
+        cd "$repo_root/services/flexplorer-api/backend"
+      fi
+    fi
+
+    if [[ -f requirements.txt ]]; then
+      echo "[wtup] backend: ensuring venv (.venv)" >&2
+      uv venv
+      # shellcheck disable=SC1091
+      source .venv/bin/activate
+
+      req_hash=""
+      if command -v sha256sum >/dev/null 2>&1; then
+        req_hash="$(sha256sum requirements.txt | awk '{print $1}')"
+      fi
+      stamp_file=".venv/.wtup_requirements.sha256"
+      installed_hash=""
+      if [[ -n "$req_hash" ]] && [[ -f "$stamp_file" ]]; then
+        installed_hash="$(tr -d '\r\n' < "$stamp_file" || true)"
+      fi
+
+      if [[ -n "$req_hash" ]] && [[ "$installed_hash" == "$req_hash" ]]; then
+        :
+      else
+        echo "[wtup] backend: installing requirements.txt" >&2
+        uv pip install -r requirements.txt
+        if [[ -n "$req_hash" ]]; then
+          printf '%s\n' "$req_hash" > "$stamp_file"
+        fi
+      fi
+    else
+      echo "[wtup] backend: warning: requirements.txt not found; skipping install" >&2
+    fi
+
+    FLEXPLORER_ALLOWED_ORIGINS="${frontend_origin},${storybook_origin}" \
+      FLEXPLORER_API_BASE_PATH= API_BASE_PATH= FLEXPLORER_BASE_PATH= \
+      exec portless "flexplorer-api.${wt_host}" bash -lc 'exec .venv/bin/python -m uvicorn main:app --reload --host "$HOST" --port "$PORT"'
+    ;;
+  frontend)
+    if [[ -x ./node_modules/.bin/vite ]]; then
+      VITE_FLEXPLORER_API_ORIGIN="$backend_origin" VITE_EXPLORER_API_ORIGIN="$backend_origin" \
+        exec portless "${wt_host}" ./node_modules/.bin/vite dev
+    else
+      VITE_FLEXPLORER_API_ORIGIN="$backend_origin" VITE_EXPLORER_API_ORIGIN="$backend_origin" \
+        exec portless "${wt_host}" vite dev
+    fi
+    ;;
+  storybook)
+    if [[ -x ./node_modules/.bin/storybook ]]; then
+      VITE_FLEXPLORER_API_ORIGIN="$backend_origin" VITE_EXPLORER_API_ORIGIN="$backend_origin" \
+        exec portless "storybook.${wt_host}" bash -ic 'exec ./node_modules/.bin/storybook dev -p "$PORT" --host "$HOST"'
+    else
+      VITE_FLEXPLORER_API_ORIGIN="$backend_origin" VITE_EXPLORER_API_ORIGIN="$backend_origin" \
+        exec portless "storybook.${wt_host}" bash -ic 'exec storybook dev -p "$PORT" --host "$HOST"'
+    fi
+    ;;
+  *)
+    echo "unknown role: $role" >&2
+    exit 2
+    ;;
+esac

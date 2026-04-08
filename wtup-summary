@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+slugify() {
+  local input="$1"
+  printf '%s' "$input" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9.]+/-/g; s/^-+//; s/-+$//; s/\.+/./g; s/^\.+//; s/\.+$//'
+}
+
+wt_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+wt_branch="$(git -C "$wt_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+
+wt_name="${WORKTREE_NAME:-}"
+if [[ -z "$wt_name" ]]; then
+  if [[ -n "$wt_branch" ]] && [[ "$wt_branch" != "HEAD" ]]; then
+    wt_name="$wt_branch"
+  else
+    wt_name="$(basename "$wt_root")"
+  fi
+fi
+
+wt_host="${WORKTREE_HOST:-}"
+if [[ -z "$wt_host" ]]; then
+  wt_host="$(slugify "$wt_name")"
+fi
+
+proxy_port="${PORTLESS_PORT:-}"
+if [[ -z "$proxy_port" ]]; then
+  if [[ -f "$HOME/.portless/proxy.port" ]]; then
+    proxy_port="$(tr -d '\r\n' < "$HOME/.portless/proxy.port" || true)"
+  elif [[ -f "/tmp/portless/proxy.port" ]]; then
+    proxy_port="$(tr -d '\r\n' < "/tmp/portless/proxy.port" || true)"
+  else
+    proxy_port="1355"
+  fi
+fi
+if ! [[ "$proxy_port" =~ ^[0-9]+$ ]]; then
+  proxy_port="1355"
+fi
+
+tls=0
+if [[ "${PORTLESS_HTTPS:-}" == "1" ]] || [[ "${PORTLESS_HTTPS:-}" == "true" ]]; then
+  tls=1
+fi
+if [[ -f "$HOME/.portless/proxy.tls" ]] || [[ -f "/tmp/portless/proxy.tls" ]]; then
+  tls=1
+fi
+
+proto="http"
+default_port="80"
+if [[ "$tls" == "1" ]]; then
+  proto="https"
+  default_port="443"
+fi
+
+fmt_url() {
+  local host="$1"
+  if [[ "$proxy_port" == "$default_port" ]]; then
+    printf '%s://%s' "$proto" "$host"
+  else
+    printf '%s://%s:%s' "$proto" "$host" "$proxy_port"
+  fi
+}
+
+frontend_host="${wt_host}.localhost"
+backend_host="flexplorer-api.${wt_host}.localhost"
+storybook_host="storybook.${wt_host}.localhost"
+
+frontend_url="$(fmt_url "$frontend_host")"
+backend_url="$(fmt_url "$backend_host")"
+storybook_url="$(fmt_url "$storybook_host")"
+
+printf 'Worktree: %s\n' "$wt_name"
+printf 'Root:     %s\n' "$wt_root"
+if [[ -n "$wt_branch" ]]; then
+  printf 'Branch:   %s\n' "$wt_branch"
+fi
+printf 'Routes:\n'
+printf '  frontend  %s\n' "$frontend_url"
+printf '  backend   %s\n' "$backend_url"
+printf '  storybook %s\n' "$storybook_url"
+
+if command -v portless >/dev/null 2>&1; then
+  routes="$(NO_COLOR=1 portless list 2>/dev/null || true)"
+  active_lines="$(printf '%s\n' "$routes" | awk -v u1="$frontend_url" -v u2="$backend_url" -v u3="$storybook_url" 'index($0,u1) || index($0,u2) || index($0,u3) {print}')"
+  if [[ -n "$active_lines" ]]; then
+    printf '\nActive routes (portless):\n'
+    printf '%s\n' "$active_lines"
+  fi
+fi
+
+if git -C "$wt_root" rev-parse --git-dir >/dev/null 2>&1; then
+  printf '\nRecent commits:\n'
+  git -C "$wt_root" --no-pager log -5 --oneline --decorate --no-color 2>/dev/null || true
+fi

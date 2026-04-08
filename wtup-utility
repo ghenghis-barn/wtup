@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v wtup-summary >/dev/null 2>&1; then
+  wtup-summary || true
+else
+  echo "wtup-summary not found in PATH" >&2
+fi
+
+echo
+echo "(tip) run: wtup-summary"
+echo
+
+exec bash -i

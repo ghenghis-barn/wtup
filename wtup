@@ -1,0 +1,510 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+reset_session=0
+from_latest_main=0
+carry_changes=0
+
+print_help() {
+  cat <<'EOF' >&2
+wtup - Launch a worktree dev workspace (zellij + portless + tools)
+
+USAGE
+  wtup [options] <worktree-branch-name|path-to-worktree>
+
+ARGUMENTS
+  <worktree-branch-name>
+    If this is not an existing directory, wtup treats it as a local branch name.
+    - If a worktree already exists for that branch, wtup reuses it.
+    - Otherwise, wtup creates a new git worktree and checks out that branch.
+    - Branch names with slashes are supported, for example feat/my-feature.
+    - New worktree directories are flattened to a single path segment, for
+      example worktrees/feat-my-feature.
+
+  <path-to-worktree>
+    If this is an existing directory, wtup treats it as an existing worktree and
+    will not create a new one.
+
+OPTIONS
+  --latest-main, -m
+    When creating a NEW worktree, base the branch on the latest remote main.
+    wtup will best-effort:
+      - detect origin/HEAD (preferred) or fall back to origin/main, origin/master
+      - git fetch the remote main branch
+      - create the branch from that remote-tracking ref
+
+  --reset, -r
+    Force a clean zellij session for this worktree (deletes the session first).
+    Useful when you change the layout/scripts and don't want resurrection.
+
+  --carry, -c
+    Copy the *current* worktree's uncommitted changes (tracked + untracked) into
+    the target worktree.
+    - Source worktree stays unchanged (copy, not move).
+    - Target worktree must be clean.
+    - Only supported between worktrees of the same repo.
+    - Uses git stash internally; if apply conflicts, the stash is kept.
+
+  --help, -h, -help
+    Show this help.
+
+  --
+    Stop processing options (treat the next token as the argument).
+
+BEHAVIOR
+  - Worktree creation
+    - Must be run from inside an existing checkout of the target git repo
+      (unless you pass an explicit worktree path).
+    - If the branch exists locally:   git worktree add <dir> <branch>
+    - If the branch does not exist:   git worktree add -b <branch> <dir> <base>
+      where <base> is WTUP_BASE_REF (default: HEAD) or latest main with -m.
+
+  - Stale base warning (new worktrees only)
+    If you create from WTUP_BASE_REF/HEAD and origin/main (or origin/master) is
+    ahead, wtup prints a warning and suggests using -m.
+
+  - Zellij
+    - Session name: WORKTREE_HOST (a portless-safe slug of the worktree name)
+    - Layout: WTUP_ZELLIJ_LAYOUT (default: prototyping_portless)
+    - Per-worktree layout is generated at: ~/.cache/wtup/layouts/<host>.kdl
+      so the first tab name includes the worktree name.
+    - EXITED sessions are deleted automatically (to avoid resurrecting stale
+      layouts/commands).
+
+  - Windows Terminal (tools window)
+    If wt.exe/cmd.exe/wsl.exe are available, wtup opens a new Windows Terminal
+    window using profile WTUP_WT_PROFILE (default: aurora_wsl) and runs:
+      - opencode
+      - codex
+    both rooted at the worktree directory.
+
+ENVIRONMENT VARIABLES
+  Worktree creation
+    WTUP_WORKTREES_DIR   Where new worktrees are created.
+                         Default: <parent-of-repo-toplevel>/worktrees
+    WTUP_BASE_REF        Base ref for new branches when not using -m.
+                         Default: HEAD
+    WTUP_MAIN_REMOTE     Remote to treat as "main" remote (for -m / warnings).
+                         Default: origin
+    WTUP_MAIN_BRANCH     Branch name to treat as "main" (fallback if no remote HEAD).
+                         Default: main
+
+  Zellij / layout
+    WTUP_ZELLIJ_LAYOUT   Zellij layout name (file in ~/.config/zellij/layouts/).
+                         Default: prototyping_portless
+
+  Windows Terminal
+    WTUP_WT_PROFILE      Windows Terminal profile name (or GUID).
+                         Default: aurora_wsl
+    WTUP_WIN_USER        Windows username (used to locate settings.json).
+                         Default: autodetected via cmd.exe %USERNAME%
+
+  Portless (consumed by pane scripts)
+    PORTLESS_PORT        Override proxy port (default: 1355)
+    PORTLESS_HTTPS       Set to 1/true to prefer https URLs in summaries
+
+EXAMPLES
+  # Attach/create worktree based on local branch name
+  wtup time_scrubber_integration
+
+  # Create a new worktree based on the latest main branch
+  wtup -m feature/new-flow
+
+  # Create a new worktree for a namespaced branch
+  wtup feat/my-feature
+
+  # Create a new worktree and copy current uncommitted changes into it
+  wtup -c feature/port-my-wip
+
+  # From inside an existing worktree
+  wtup .
+
+  # Force session rebuild (use after changing layouts/scripts)
+  wtup --reset .
+
+RELATED
+  wtup-summary   Prints the routes + recent git history (Utility Bash pane uses this).
+EOF
+}
+
+arg=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reset|-r)
+      reset_session=1
+      shift
+      ;;
+    --latest-main|--from-latest-main|-m)
+      from_latest_main=1
+      shift
+      ;;
+    --carry|--carry-changes|--copy-changes|-c)
+      carry_changes=1
+      shift
+      ;;
+    --help|-h)
+      print_help
+      exit 0
+      ;;
+    -help)
+      print_help
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      arg="$1"
+      shift
+      break
+      ;;
+  esac
+done
+
+if [[ -z "$arg" ]]; then
+  echo "usage: wtup [--reset|-r] [--latest-main|-m] [--carry|-c] <worktree-branch-name|path-to-worktree>" >&2
+  exit 2
+fi
+
+slugify() {
+  local input="$1"
+  printf '%s' "$input" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9.]+/-/g; s/^-+//; s/-+$//; s/\.+/./g; s/^\.+//; s/\.+$//'
+}
+
+flatten_worktree_name() {
+  local input="$1"
+  printf '%s' "$input" |
+    sed -E 's#/+#-#g'
+}
+
+abs_path() {
+  local base="$1"
+  local p="$2"
+  if [[ "$p" == /* ]]; then
+    realpath -m "$p"
+  else
+    realpath -m "$base/$p"
+  fi
+}
+
+wt_profile="${WTUP_WT_PROFILE:-aurora_wsl}"
+wt_layout="${WTUP_ZELLIJ_LAYOUT:-prototyping_portless}"
+
+wt_root=""
+wt_name=""
+wt_dir_name=""
+
+if [[ -d "$arg" ]]; then
+  wt_root="$(cd "$arg" && pwd -P)"
+  if ! git -C "$wt_root" rev-parse --show-toplevel >/dev/null 2>&1; then
+    echo "wtup: not a git worktree: $wt_root" >&2
+    exit 1
+  fi
+  wt_branch="$(git -C "$wt_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -n "$wt_branch" ]] && [[ "$wt_branch" != "HEAD" ]]; then
+    wt_name="$wt_branch"
+  else
+    wt_name="$(basename "$wt_root")"
+  fi
+else
+  wt_name="$arg"
+  wt_dir_name="$(flatten_worktree_name "$wt_name")"
+  if [[ -z "$wt_dir_name" ]]; then
+    echo "wtup: could not derive a worktree directory name from: $wt_name" >&2
+    exit 1
+  fi
+  if ! git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "wtup: run from inside the main repo (or pass a worktree path)" >&2
+    exit 1
+  fi
+
+  wt_root=""
+  cur_path=""
+  cur_branch=""
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        cur_path="${line#worktree }"
+        cur_branch=""
+        ;;
+      branch\ refs/heads/*)
+        cur_branch="${line#branch refs/heads/}"
+        ;;
+      "")
+        if [[ "$cur_branch" == "$wt_name" ]]; then
+          wt_root="$cur_path"
+          break
+        fi
+        ;;
+    esac
+  done < <(git -C "$git_root" worktree list --porcelain; echo)
+
+  if [[ -z "$wt_root" ]]; then
+    wt_parent="${WTUP_WORKTREES_DIR:-"$(dirname "$git_root")/worktrees"}"
+    wt_root="${wt_parent}/${wt_dir_name}"
+    base_ref="${WTUP_BASE_REF:-HEAD}"
+
+    # Resolve the "main" ref used for --latest-main and stale-base warnings.
+    # Default: origin/main, but we will:
+    # - Prefer origin/HEAD if it exists
+    # - Fall back to origin/master if origin/main is missing
+    main_remote="${WTUP_MAIN_REMOTE:-origin}"
+    main_branch="${WTUP_MAIN_BRANCH:-main}"
+
+    if git -C "$git_root" remote get-url "$main_remote" >/dev/null 2>&1; then
+      remote_head="$(git -C "$git_root" symbolic-ref --quiet "refs/remotes/${main_remote}/HEAD" 2>/dev/null || true)"
+      if [[ -n "$remote_head" ]]; then
+        main_remote_ref="${remote_head#refs/remotes/}"
+        main_remote="${main_remote_ref%%/*}"
+        main_branch="${main_remote_ref#*/}"
+      else
+        if ! git -C "$git_root" rev-parse --verify --quiet "refs/remotes/${main_remote}/${main_branch}" >/dev/null 2>&1; then
+          if git -C "$git_root" rev-parse --verify --quiet "refs/remotes/${main_remote}/master" >/dev/null 2>&1; then
+            main_branch="master"
+          fi
+        fi
+        main_remote_ref="${main_remote}/${main_branch}"
+      fi
+    else
+      main_remote_ref="${main_remote}/${main_branch}"
+    fi
+
+    # Best-effort fetch so "latest" is actually latest.
+    fetch_failed=0
+    if git -C "$git_root" remote get-url "$main_remote" >/dev/null 2>&1; then
+      if ! GIT_TERMINAL_PROMPT=0 git -C "$git_root" fetch --quiet "$main_remote" "$main_branch" >/dev/null 2>&1; then
+        fetch_failed=1
+      fi
+    fi
+
+    if [[ "$from_latest_main" == "1" ]]; then
+      if [[ "$fetch_failed" == "1" ]]; then
+        echo "wtup: warning: failed to fetch ${main_remote}/${main_branch}; using local ${main_remote_ref} state" >&2
+      fi
+      if git -C "$git_root" rev-parse --verify --quiet "${main_remote_ref}^{commit}" >/dev/null 2>&1; then
+        base_ref="$main_remote_ref"
+      elif git -C "$git_root" show-ref --verify --quiet "refs/heads/${main_branch}" >/dev/null 2>&1; then
+        echo "wtup: warning: ${main_remote_ref} not found; using local ${main_branch}" >&2
+        base_ref="$main_branch"
+      else
+        echo "wtup: error: cannot resolve ${main_remote_ref} (and no local ${main_branch}); cannot create from latest main" >&2
+        exit 1
+      fi
+    else
+      # Warn when creating a new worktree from a base that does not include latest main.
+      if git -C "$git_root" rev-parse --verify --quiet "${main_remote_ref}^{commit}" >/dev/null 2>&1 && git -C "$git_root" rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null 2>&1; then
+        counts="$(git -C "$git_root" rev-list --left-right --count "${base_ref}...${main_remote_ref}" 2>/dev/null || true)"
+        left_count=""
+        right_count=""
+        read -r left_count right_count <<<"$counts" || true
+        if [[ -n "${right_count:-}" ]] && [[ "$right_count" != "0" ]]; then
+          base_sha="$(git -C "$git_root" rev-parse --short "${base_ref}^{commit}" 2>/dev/null || true)"
+          main_sha="$(git -C "$git_root" rev-parse --short "${main_remote_ref}^{commit}" 2>/dev/null || true)"
+          echo "wtup: warning: creating '$wt_name' from ${base_ref} (${base_sha}), but ${main_remote_ref} is ahead by ${right_count} commit(s) (${main_sha})" >&2
+          echo "wtup: hint: use 'wtup --latest-main $wt_name' to base on latest main" >&2
+        fi
+      fi
+    fi
+
+    mkdir -p "$wt_parent"
+    if [[ -e "$wt_root" ]]; then
+      echo "wtup: error: target worktree path already exists: $wt_root" >&2
+      echo "wtup: hint: an existing branch may already map to the same flattened path" >&2
+      exit 1
+    fi
+
+    if git -C "$git_root" show-ref --verify --quiet "refs/heads/${wt_name}"; then
+      git -C "$git_root" worktree add "$wt_root" "$wt_name"
+    else
+      git -C "$git_root" worktree add -b "$wt_name" "$wt_root" "$base_ref"
+    fi
+  fi
+fi
+
+wt_host="${WORKTREE_HOST:-"$(slugify "$wt_name")"}"
+if [[ -z "$wt_host" ]]; then
+  echo "wtup: could not derive a portless-safe name from: $wt_name" >&2
+  exit 1
+fi
+
+if [[ "$carry_changes" == "1" ]]; then
+  if ! src_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    echo "wtup: error: --carry must be run from inside the source worktree" >&2
+    exit 1
+  fi
+
+  src_root_abs="$(realpath -m "$src_root")"
+  wt_root_abs="$(realpath -m "$wt_root")"
+  if [[ "$src_root_abs" != "$wt_root_abs" ]]; then
+    src_common="$(git -C "$src_root" rev-parse --git-common-dir 2>/dev/null || true)"
+    tgt_common="$(git -C "$wt_root" rev-parse --git-common-dir 2>/dev/null || true)"
+    if [[ -z "$src_common" ]] || [[ -z "$tgt_common" ]]; then
+      echo "wtup: error: --carry requires both source and target to be git worktrees" >&2
+      exit 1
+    fi
+    if [[ "$(abs_path "$src_root" "$src_common")" != "$(abs_path "$wt_root" "$tgt_common")" ]]; then
+      echo "wtup: error: --carry only supports worktrees of the same repo" >&2
+      exit 1
+    fi
+
+    src_status="$(git -C "$src_root" status --porcelain=v1 2>/dev/null || true)"
+    if [[ -n "$src_status" ]]; then
+      if [[ -n "$(git -C "$src_root" diff --name-only --diff-filter=U 2>/dev/null || true)" ]]; then
+        echo "wtup: error: cannot carry changes with unresolved merge conflicts in source" >&2
+        exit 1
+      fi
+
+      tgt_status="$(git -C "$wt_root" status --porcelain=v1 2>/dev/null || true)"
+      if [[ -n "$tgt_status" ]]; then
+        echo "wtup: error: target worktree has uncommitted changes; clean it before using --carry" >&2
+        exit 1
+      fi
+
+      echo "wtup: carrying uncommitted changes -> $wt_root" >&2
+
+      stash_msg="wtup carry: ${src_root_abs} -> ${wt_root_abs}"
+      git -C "$src_root" stash push -u -m "$stash_msg" >/dev/null
+      stash_sha="$(git -C "$src_root" rev-parse stash@{0} 2>/dev/null || true)"
+
+      carry_failed=0
+      if ! git -C "$wt_root" stash apply --index stash@{0}; then
+        echo "wtup: warning: applying carried changes to target had conflicts; stash kept (stash@{0})" >&2
+        carry_failed=1
+      fi
+
+      if ! git -C "$src_root" stash apply --index stash@{0}; then
+        echo "wtup: error: failed to restore source changes; recover with: git stash list && git stash apply --index stash@{0}" >&2
+        exit 1
+      fi
+
+      if [[ "$carry_failed" == "0" ]] && [[ -n "$stash_sha" ]]; then
+        cur_sha="$(git -C "$src_root" rev-parse stash@{0} 2>/dev/null || true)"
+        if [[ "$cur_sha" == "$stash_sha" ]]; then
+          git -C "$src_root" stash drop stash@{0} >/dev/null 2>&1 || true
+        else
+          echo "wtup: warning: stash@{0} changed; not dropping carry stash" >&2
+        fi
+      fi
+    fi
+  fi
+fi
+
+# Open separate Windows Terminal window with opencode+codex splits (WSL)
+if command -v cmd.exe >/dev/null 2>&1 && command -v wt.exe >/dev/null 2>&1 && command -v wsl.exe >/dev/null 2>&1; then
+  distro="${WSL_DISTRO_NAME:-}"
+
+  # Resolve the profile to a GUID to avoid duplicates (eg. hidden WSL auto-profiles)
+  wt_profile_arg="$wt_profile"
+  win_user="${WTUP_WIN_USER:-}"
+  if [[ -z "$win_user" ]]; then
+    win_user="$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r' || true)"
+  fi
+  if [[ -z "$win_user" ]]; then
+    win_user="LouisBlackburn"
+  fi
+  wt_settings="/mnt/c/Users/${win_user}/AppData/Local/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+  if [[ -f "$wt_settings" ]] && command -v python3 >/dev/null 2>&1; then
+    guid="$(python3 - "$wt_settings" "$wt_profile" <<'PY'
+import json
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+
+profiles = (data.get("profiles") or {}).get("list") or []
+matches = [p for p in profiles if p.get("name") == name and p.get("guid")]
+
+# Prefer visible profiles
+for p in matches:
+    if not p.get("hidden", False):
+        print(p["guid"])
+        sys.exit(0)
+
+if matches:
+    print(matches[0]["guid"])
+PY
+    )"
+    guid="${guid//$'\r'/}"
+    if [[ -n "$guid" ]]; then
+      wt_profile_arg="$guid"
+    fi
+  fi
+
+  cmd=(cmd.exe /c start "" wt.exe -w new)
+  cmd+=(new-tab -p "$wt_profile_arg" --title "${wt_name} opencode" wsl.exe)
+  if [[ -n "$distro" ]]; then
+    cmd+=(-d "$distro")
+  fi
+  cmd+=(--cd "$wt_root" -- bash -ic "exec opencode")
+  cmd+=(";")
+  cmd+=(split-pane -H -p "$wt_profile_arg" --title "${wt_name} codex" wsl.exe)
+  if [[ -n "$distro" ]]; then
+    cmd+=(-d "$distro")
+  fi
+  cmd+=(--cd "$wt_root" -- bash -ic "exec codex")
+
+  "${cmd[@]}" >/dev/null 2>&1 || true
+fi
+
+cd "$wt_root"
+export WORKTREE_NAME="$wt_name"
+export WORKTREE_HOST="$wt_host"
+
+# Generate a per-worktree layout so the first tab name is correct without runtime renames
+layout_arg="$wt_layout"
+layout_src="${HOME}/.config/zellij/layouts/${wt_layout}.kdl"
+layout_out="${HOME}/.cache/wtup/layouts/${wt_host}.kdl"
+if [[ -f "$layout_src" ]] && command -v python3 >/dev/null 2>&1; then
+  mkdir -p "$(dirname "$layout_out")"
+  python3 - "$layout_src" "$layout_out" "$wt_name" <<'PY'
+import sys
+
+src, dst, wt_name = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def kdl_escape(s: str) -> str:
+    return s.replace('\\', '\\\\').replace('"', '\\"')
+
+with open(src, encoding='utf-8') as f:
+    data = f.read()
+
+escaped = kdl_escape(wt_name)
+
+replacements = [
+    ('tab name="[WT]"', f'tab name="[WT] - {escaped}"'),
+    ('tab name="[WT] - {WorktreeName}"', f'tab name="[WT] - {escaped}"'),
+]
+
+for needle, repl in replacements:
+    if needle in data:
+        data = data.replace(needle, repl, 1)
+        break
+
+with open(dst, 'w', encoding='utf-8', newline='\n') as f:
+    f.write(data)
+PY
+  layout_arg="$layout_out"
+fi
+
+if [[ "$reset_session" == "1" ]]; then
+  zellij delete-session -f "$wt_host" >/dev/null 2>&1 || true
+fi
+
+session_line="$(zellij list-sessions -n 2>/dev/null | awk -v s="$wt_host" '$1 == s { print; exit }')"
+if [[ -n "$session_line" ]] && [[ "$session_line" == *"(EXITED"* ]]; then
+  # Avoid resurrecting stale sessions: they preserve old pane commands and tab names.
+  zellij delete-session "$wt_host" >/dev/null 2>&1 || true
+  session_line=""
+fi
+
+if [[ -n "$session_line" ]]; then
+  exec zellij attach "$wt_host"
+else
+  exec zellij -s "$wt_host" -n "$layout_arg"
+fi
