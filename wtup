@@ -444,7 +444,7 @@ PY
   fi
   cmd+=(--cd "$wt_root" -- bash -ic "exec opencode")
   cmd+=(";")
-  cmd+=(split-pane -H -p "$wt_profile_arg" --title "${wt_name} codex" wsl.exe)
+  cmd+=(split-pane -V -p "$wt_profile_arg" --title "${wt_name} codex" wsl.exe)
   if [[ -n "$distro" ]]; then
     cmd+=(-d "$distro")
   fi
