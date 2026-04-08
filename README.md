@@ -27,11 +27,18 @@ wtup .
 
 ## Install locally
 
-Copy or symlink the scripts into `~/.local/bin`:
+Use the installer from the repo root:
 
 ```bash
-cp wtup wtup-pane wtup-summary wtup-utility ~/.local/bin/
-chmod +x ~/.local/bin/wtup ~/.local/bin/wtup-pane ~/.local/bin/wtup-summary ~/.local/bin/wtup-utility
+./install.sh
+```
+
+That installs symlinks into `~/.local/bin` by default, so local repo changes are picked up immediately.
+
+For a static copied install:
+
+```bash
+./install.sh --copy
 ```
 
 ## Publish follow-up
