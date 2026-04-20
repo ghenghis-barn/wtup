@@ -28,6 +28,8 @@ ARGUMENTS
 OPTIONS
   --latest-main, -m
     When creating a NEW worktree, base the branch on the latest remote main.
+    By default, new branches are based on WTUP_BASE_REF (default: HEAD),
+    which means the current checkout/worktree HEAD.
     wtup will best-effort:
       - detect origin/HEAD (preferred) or fall back to origin/main, origin/master
       - git fetch the remote main branch
@@ -57,7 +59,10 @@ BEHAVIOR
       (unless you pass an explicit worktree path).
     - If the branch exists locally:   git worktree add <dir> <branch>
     - If the branch does not exist:   git worktree add -b <branch> <dir> <base>
-      where <base> is WTUP_BASE_REF (default: HEAD) or latest main with -m.
+      where <base> is WTUP_BASE_REF (default: HEAD of the current
+      checkout/worktree) or latest main with -m.
+    - This means `wtup new-branch` from inside an existing feature worktree
+      creates `new-branch` from that worktree's current commit by default.
 
   - Stale base warning (new worktrees only)
     If you create from WTUP_BASE_REF/HEAD and origin/main (or origin/master) is
@@ -110,8 +115,14 @@ EXAMPLES
   # Create a new worktree based on the latest main branch
   wtup -m feature/new-flow
 
+  # Create a new worktree from the current worktree HEAD
+  wtup feature/follow-up
+
   # Create a new worktree for a namespaced branch
   wtup feat/my-feature
+
+  # Create a new worktree from an explicit ref/branch/tag/SHA
+  WTUP_BASE_REF=feat/my-feature wtup feat/my-feature-follow-up
 
   # Create a new worktree and copy current uncommitted changes into it
   wtup -c feature/port-my-wip
@@ -217,7 +228,7 @@ else
     exit 1
   fi
   if ! git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    echo "wtup: run from inside the main repo (or pass a worktree path)" >&2
+    echo "wtup: run from inside any checkout/worktree of the target repo (or pass a worktree path)" >&2
     exit 1
   fi
 
