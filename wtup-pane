@@ -3,7 +3,7 @@ set -euo pipefail
 
 role="${1:-}"
 if [[ -z "$role" ]]; then
-  echo "usage: wtup-pane <backend|frontend|storybook>" >&2
+  echo "usage: wtup-pane <backend|frontend|storybook|app>" >&2
   exit 2
 fi
 
@@ -68,6 +68,37 @@ frontend_origin="$(fmt_origin "${wt_host}.localhost")"
 backend_origin="$(fmt_origin "flexplorer-api.${wt_host}.localhost")"
 storybook_origin="$(fmt_origin "storybook.${wt_host}.localhost")"
 
+resolve_frontend_run_command() {
+  if [[ -n "${WTUP_FRONTEND_RUN_COMMAND:-}" ]]; then
+    printf '%s' "${WTUP_FRONTEND_RUN_COMMAND}"
+    return
+  fi
+
+  if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
+    printf 'pnpm run dev'
+    return
+  fi
+
+  if [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
+    printf 'yarn dev'
+    return
+  fi
+
+  if [[ -f bun.lockb || -f bun.lock ]] && command -v bun >/dev/null 2>&1; then
+    printf 'bun run dev'
+    return
+  fi
+
+  printf 'npm run dev'
+}
+
+escape_bash_double_quoted() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
 case "$role" in
   backend)
     # Backend bootstrap for clean worktrees:
@@ -130,6 +161,11 @@ case "$role" in
       VITE_FLEXPLORER_API_ORIGIN="$backend_origin" VITE_EXPLORER_API_ORIGIN="$backend_origin" \
         exec portless "storybook.${wt_host}" bash -ic 'exec storybook dev -p "$PORT" --host "$HOST"'
     fi
+    ;;
+  app)
+    frontend_run_command="$(resolve_frontend_run_command)"
+    frontend_run_command="$(escape_bash_double_quoted "$frontend_run_command")"
+    exec portless "${wt_host}" bash -lc "exec ${frontend_run_command}"
     ;;
   *)
     echo "unknown role: $role" >&2

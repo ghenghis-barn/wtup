@@ -18,7 +18,7 @@
 - Creates new branches from the current checkout/worktree `HEAD` by default; use `-m` to base on latest main instead.
 - Auto-detects `forged-realms` worktrees as the `frontend` preset and leaves everything else on the default fullstack preset.
 - Supports a `frontend` preset for standard React/frontend projects with one app pane and utility shells.
-- Lets the Windows Terminal tools window run configurable commands such as `opencode`, `claude`, and `codex`.
+- Spawns `omp` and `codex` by default in the Windows Terminal tools window, configurable through `WTUP_WT_COMMANDS`.
 
 ## Usage
 
@@ -60,8 +60,8 @@ WTUP_WT_COMMANDS=claude,codex wtup .
 - `WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*'` adds frontend auto-detection rules.
 - `WTUP_FULLSTACK_PROJECT_PATTERNS='*design_system_evolution*'` forces the fullstack preset before frontend matching.
 - `WTUP_FRONTEND_RUN_COMMAND="npm run dev"` overrides the app pane command for the frontend preset.
-- `WTUP_WT_COMMANDS=claude,codex` replaces `opencode` with `claude` in the tools window.
-- `WTUP_WT_COMMANDS=opencode,claude,codex` opens all three tools.
+- `WTUP_WT_COMMANDS=claude,codex` replaces `omp` with `claude` in the tools window.
+- `WTUP_WT_COMMANDS=omp,claude,codex` opens all three tools.
 
 ## Install locally
 

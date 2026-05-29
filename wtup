@@ -70,7 +70,12 @@ BEHAVIOR
 
   - Zellij
     - Session name: WORKTREE_HOST (a portless-safe slug of the worktree name)
-    - Layout: WTUP_ZELLIJ_LAYOUT (default: prototyping_portless)
+    - Layout preset: auto-detected unless WTUP_PROJECT_CONFIG is set
+    - Layout: WTUP_ZELLIJ_LAYOUT
+      - default for fullstack: prototyping_portless
+      - default for frontend: wtup_frontend
+    - Default auto-detection matches forged-realms worktrees to frontend.
+      Everything else falls back to fullstack.
     - Per-worktree layout is generated at: ~/.cache/wtup/layouts/<host>.kdl
       so the first tab name includes the worktree name.
     - EXITED sessions are deleted automatically (to avoid resurrecting stale
@@ -78,9 +83,11 @@ BEHAVIOR
 
   - Windows Terminal (tools window)
     If wt.exe/cmd.exe/wsl.exe are available, wtup opens a new Windows Terminal
-    window using profile WTUP_WT_PROFILE (default: aurora_wsl) and runs:
-      - opencode
-      - codex
+    window using profile WTUP_WT_PROFILE (default: aurora_wsl) and runs the
+    comma-separated commands from WTUP_WT_COMMANDS (default: omp,codex).
+    Examples:
+      - claude,codex
+      - omp,claude,codex
     both rooted at the worktree directory.
 
 ENVIRONMENT VARIABLES
@@ -94,13 +101,35 @@ ENVIRONMENT VARIABLES
     WTUP_MAIN_BRANCH     Branch name to treat as "main" (fallback if no remote HEAD).
                          Default: main
 
+  Workspace preset
+    WTUP_PROJECT_CONFIG  Explicit workspace preset override. Values: fullstack, frontend
+                         - fullstack: frontend + backend + storybook panes
+                         - frontend: single app pane + utility bash panes
+                         If unset, wtup auto-detects based on the resolved
+                         worktree and common repo path.
+    WTUP_FRONTEND_PROJECT_PATTERNS
+                         Comma-separated shell globs used for frontend auto-detection.
+                         Matched against the worktree path, common repo path,
+                         common repo basename, and worktree name.
+                         Default: *forged-realms*
+    WTUP_FULLSTACK_PROJECT_PATTERNS
+                         Optional comma-separated shell globs that force the
+                         fullstack preset before frontend matching.
+    WTUP_FRONTEND_RUN_COMMAND
+                         Command used by the frontend preset app pane.
+                         Default: auto-detect package manager, then run the dev
+                         script (pnpm/yarn/bun/npm)
+
   Zellij / layout
     WTUP_ZELLIJ_LAYOUT   Zellij layout name (file in ~/.config/zellij/layouts/).
-                         Default: prototyping_portless
+                         If unset, wtup picks a preset-specific default layout.
+                         The frontend preset falls back to a built-in layout.
 
   Windows Terminal
     WTUP_WT_PROFILE      Windows Terminal profile name (or GUID).
                          Default: aurora_wsl
+    WTUP_WT_COMMANDS     Comma-separated commands to open in the tools window.
+                         Default: omp,codex
     WTUP_WIN_USER        Windows username (used to locate settings.json).
                          Default: autodetected via cmd.exe %USERNAME%
 
@@ -132,6 +161,18 @@ EXAMPLES
 
   # Force session rebuild (use after changing layouts/scripts)
   wtup --reset .
+
+  # Frontend-only React workspace (single app pane + utility shells)
+  WTUP_PROJECT_CONFIG=frontend wtup feat/ui-refresh
+
+  # Make a specific repo family auto-detect as frontend
+  WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*' wtup .
+
+  # Use claude instead of omp in the tools window
+  WTUP_WT_COMMANDS=claude,codex wtup .
+
+  # Open omp, claude, and codex in the tools window
+  WTUP_WT_COMMANDS=omp,claude,codex wtup .
 
 RELATED
   wtup-summary   Prints the routes + recent git history (Utility Bash pane uses this).
@@ -201,8 +242,204 @@ abs_path() {
   fi
 }
 
+resolve_common_repo_root() {
+  local worktree_root="$1"
+  local common_dir=""
+  local common_abs=""
+
+  common_dir="$(git -C "$worktree_root" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -z "$common_dir" ]]; then
+    return
+  fi
+
+  common_abs="$(abs_path "$worktree_root" "$common_dir")"
+  if [[ "$common_abs" == */.git ]]; then
+    printf '%s' "${common_abs%/.git}"
+  fi
+}
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+pattern_list_matches() {
+  local value="$1"
+  local patterns_csv="$2"
+  local pattern=""
+  local patterns=()
+
+  if [[ -z "$patterns_csv" ]]; then
+    return 1
+  fi
+
+  IFS=',' read -r -a patterns <<< "$patterns_csv"
+  for pattern in "${patterns[@]}"; do
+    pattern="$(trim_whitespace "$pattern")"
+    if [[ -n "$pattern" ]] && [[ "$value" == $pattern ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+detect_project_config() {
+  local worktree_root="$1"
+  local worktree_name="$2"
+  local explicit_config="${WTUP_PROJECT_CONFIG:-}"
+  local frontend_patterns="${WTUP_FRONTEND_PROJECT_PATTERNS:-*forged-realms*}"
+  local fullstack_patterns="${WTUP_FULLSTACK_PROJECT_PATTERNS:-}"
+  local common_repo_root=""
+  local candidate=""
+  local candidates=()
+
+  if [[ -n "$explicit_config" ]]; then
+    printf '%s' "$explicit_config"
+    return
+  fi
+
+  common_repo_root="$(resolve_common_repo_root "$worktree_root")"
+
+  candidates+=("$worktree_root")
+  candidates+=("$worktree_name")
+  if [[ -n "$common_repo_root" ]]; then
+    candidates+=("$common_repo_root")
+    candidates+=("$(basename "$common_repo_root")")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if pattern_list_matches "$candidate" "$fullstack_patterns"; then
+      printf 'fullstack'
+      return
+    fi
+  done
+
+  for candidate in "${candidates[@]}"; do
+    if pattern_list_matches "$candidate" "$frontend_patterns"; then
+      printf 'frontend'
+      return
+    fi
+  done
+
+  printf 'fullstack'
+}
+
+escape_kdl_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+escape_bash_double_quoted() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+write_builtin_frontend_layout() {
+  local dst="$1"
+  local worktree_title="$2"
+  local escaped_title
+
+  escaped_title="$(escape_kdl_string "$worktree_title")"
+
+  cat > "$dst" <<EOF
+layout {
+    cwd "."
+    tab name="[WT] - ${escaped_title}" focus=true hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane command="wtup-utility" name="Workspace Summary" cwd="." focus=true size="38%" {
+            }
+            pane split_direction="horizontal" size="62%" {
+                pane command="wtup-pane" name="[BgT]---Frontend" cwd="." size="48%" {
+                    args "app"
+                }
+                pane command="bash" name="Utility Bash" cwd="." size="26%" {
+                }
+                pane command="bash" name="Scratch Bash" cwd="." size="26%" {
+                }
+            }
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="Nvim" hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane command="nvim" cwd="." {
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    new_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane cwd="."
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+}
+EOF
+}
+
+append_windows_terminal_command() {
+  local mode="$1"
+  local agent_cmd="$2"
+  local agent_title
+  local escaped_cmd
+
+  agent_title="$(trim_whitespace "${agent_cmd%% *}")"
+  if [[ -z "$agent_title" ]]; then
+    agent_title="tool"
+  fi
+
+  escaped_cmd="$(escape_bash_double_quoted "$agent_cmd")"
+
+  case "$mode" in
+    new-tab)
+      cmd+=(new-tab -p "$wt_profile_arg" --title "${wt_name} ${agent_title}" wsl.exe)
+      ;;
+    split-pane)
+      cmd+=(split-pane -V -p "$wt_profile_arg" --title "${wt_name} ${agent_title}" wsl.exe)
+      ;;
+    *)
+      echo "wtup: unsupported Windows Terminal mode: $mode" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -n "$distro" ]]; then
+    cmd+=(-d "$distro")
+  fi
+
+  cmd+=(--cd "$wt_root" -- bash -ic "exec ${escaped_cmd}")
+}
+
 wt_profile="${WTUP_WT_PROFILE:-aurora_wsl}"
-wt_layout="${WTUP_ZELLIJ_LAYOUT:-prototyping_portless}"
+wt_project_config=""
+wt_layout=""
+
+wt_agent_commands=()
+IFS=',' read -r -a wt_agent_tokens <<< "${WTUP_WT_COMMANDS:-omp,codex}"
+for token in "${wt_agent_tokens[@]}"; do
+  token="$(trim_whitespace "$token")"
+  if [[ -n "$token" ]]; then
+    wt_agent_commands+=("$token")
+  fi
+done
 
 wt_root=""
 wt_name=""
@@ -341,6 +578,21 @@ if [[ -z "$wt_host" ]]; then
   exit 1
 fi
 
+wt_project_config="$(detect_project_config "$wt_root" "$wt_name")"
+case "$wt_project_config" in
+  fullstack)
+    default_layout="prototyping_portless"
+    ;;
+  frontend)
+    default_layout="wtup_frontend"
+    ;;
+  *)
+    echo "wtup: unknown WTUP_PROJECT_CONFIG: $wt_project_config (expected: fullstack or frontend)" >&2
+    exit 2
+    ;;
+esac
+wt_layout="${WTUP_ZELLIJ_LAYOUT:-$default_layout}"
+
 if [[ "$carry_changes" == "1" ]]; then
   if ! src_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo "wtup: error: --carry must be run from inside the source worktree" >&2
@@ -403,8 +655,8 @@ if [[ "$carry_changes" == "1" ]]; then
   fi
 fi
 
-# Open separate Windows Terminal window with opencode+codex splits (WSL)
-if command -v cmd.exe >/dev/null 2>&1 && command -v wt.exe >/dev/null 2>&1 && command -v wsl.exe >/dev/null 2>&1; then
+# Open separate Windows Terminal window with configured tool commands (WSL)
+if command -v cmd.exe >/dev/null 2>&1 && command -v wt.exe >/dev/null 2>&1 && command -v wsl.exe >/dev/null 2>&1 && (( ${#wt_agent_commands[@]} > 0 )); then
   distro="${WSL_DISTRO_NAME:-}"
 
   # Resolve the profile to a GUID to avoid duplicates (eg. hidden WSL auto-profiles)
@@ -449,17 +701,20 @@ PY
   fi
 
   cmd=(cmd.exe /c start "" wt.exe -w new)
-  cmd+=(new-tab -p "$wt_profile_arg" --title "${wt_name} opencode" wsl.exe)
-  if [[ -n "$distro" ]]; then
-    cmd+=(-d "$distro")
+  if (( ${#wt_agent_commands[@]} == 1 )); then
+    append_windows_terminal_command new-tab "${wt_agent_commands[0]}"
+  elif (( ${#wt_agent_commands[@]} == 2 )); then
+    append_windows_terminal_command new-tab "${wt_agent_commands[0]}"
+    cmd+=(";")
+    append_windows_terminal_command split-pane "${wt_agent_commands[1]}"
+  else
+    for i in "${!wt_agent_commands[@]}"; do
+      if (( i > 0 )); then
+        cmd+=(";")
+      fi
+      append_windows_terminal_command new-tab "${wt_agent_commands[i]}"
+    done
   fi
-  cmd+=(--cd "$wt_root" -- bash -ic "exec opencode")
-  cmd+=(";")
-  cmd+=(split-pane -V -p "$wt_profile_arg" --title "${wt_name} codex" wsl.exe)
-  if [[ -n "$distro" ]]; then
-    cmd+=(-d "$distro")
-  fi
-  cmd+=(--cd "$wt_root" -- bash -ic "exec codex")
 
   "${cmd[@]}" >/dev/null 2>&1 || true
 fi
@@ -467,12 +722,17 @@ fi
 cd "$wt_root"
 export WORKTREE_NAME="$wt_name"
 export WORKTREE_HOST="$wt_host"
+export WTUP_PROJECT_CONFIG="$wt_project_config"
 
 # Generate a per-worktree layout so the first tab name is correct without runtime renames
 layout_arg="$wt_layout"
 layout_src="${HOME}/.config/zellij/layouts/${wt_layout}.kdl"
 layout_out="${HOME}/.cache/wtup/layouts/${wt_host}.kdl"
-if [[ -f "$layout_src" ]] && command -v python3 >/dev/null 2>&1; then
+if [[ "$wt_project_config" == "frontend" ]] && [[ "$wt_layout" == "$default_layout" ]] && [[ ! -f "$layout_src" ]]; then
+  mkdir -p "$(dirname "$layout_out")"
+  write_builtin_frontend_layout "$layout_out" "$wt_name"
+  layout_arg="$layout_out"
+elif [[ -f "$layout_src" ]] && command -v python3 >/dev/null 2>&1; then
   mkdir -p "$(dirname "$layout_out")"
   python3 - "$layout_src" "$layout_out" "$wt_name" <<'PY'
 import sys

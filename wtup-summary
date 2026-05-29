@@ -8,6 +8,101 @@ slugify() {
     sed -E 's/[^a-z0-9.]+/-/g; s/^-+//; s/-+$//; s/\.+/./g; s/^\.+//; s/\.+$//'
 }
 
+abs_path() {
+  local base="$1"
+  local p="$2"
+  if [[ "$p" == /* ]]; then
+    realpath -m "$p"
+  else
+    realpath -m "$base/$p"
+  fi
+}
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+pattern_list_matches() {
+  local value="$1"
+  local patterns_csv="$2"
+  local pattern=""
+  local patterns=()
+
+  if [[ -z "$patterns_csv" ]]; then
+    return 1
+  fi
+
+  IFS=',' read -r -a patterns <<< "$patterns_csv"
+  for pattern in "${patterns[@]}"; do
+    pattern="$(trim_whitespace "$pattern")"
+    if [[ -n "$pattern" ]] && [[ "$value" == $pattern ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resolve_common_repo_root() {
+  local worktree_root="$1"
+  local common_dir=""
+  local common_abs=""
+
+  common_dir="$(git -C "$worktree_root" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -z "$common_dir" ]]; then
+    return
+  fi
+
+  common_abs="$(abs_path "$worktree_root" "$common_dir")"
+  if [[ "$common_abs" == */.git ]]; then
+    printf '%s' "${common_abs%/.git}"
+  fi
+}
+
+detect_project_config() {
+  local worktree_root="$1"
+  local worktree_name="$2"
+  local explicit_config="${WTUP_PROJECT_CONFIG:-}"
+  local frontend_patterns="${WTUP_FRONTEND_PROJECT_PATTERNS:-*forged-realms*}"
+  local fullstack_patterns="${WTUP_FULLSTACK_PROJECT_PATTERNS:-}"
+  local common_repo_root=""
+  local candidate=""
+  local candidates=()
+
+  if [[ -n "$explicit_config" ]]; then
+    printf '%s' "$explicit_config"
+    return
+  fi
+
+  common_repo_root="$(resolve_common_repo_root "$worktree_root")"
+
+  candidates+=("$worktree_root")
+  candidates+=("$worktree_name")
+  if [[ -n "$common_repo_root" ]]; then
+    candidates+=("$common_repo_root")
+    candidates+=("$(basename "$common_repo_root")")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if pattern_list_matches "$candidate" "$fullstack_patterns"; then
+      printf 'fullstack'
+      return
+    fi
+  done
+
+  for candidate in "${candidates[@]}"; do
+    if pattern_list_matches "$candidate" "$frontend_patterns"; then
+      printf 'frontend'
+      return
+    fi
+  done
+
+  printf 'fullstack'
+}
+
 wt_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
 wt_branch="$(git -C "$wt_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 
@@ -24,6 +119,8 @@ wt_host="${WORKTREE_HOST:-}"
 if [[ -z "$wt_host" ]]; then
   wt_host="$(slugify "$wt_name")"
 fi
+
+wt_project_config="$(detect_project_config "$wt_root" "$wt_name")"
 
 proxy_port="${PORTLESS_PORT:-}"
 if [[ -z "$proxy_port" ]]; then
@@ -76,14 +173,21 @@ printf 'Root:     %s\n' "$wt_root"
 if [[ -n "$wt_branch" ]]; then
   printf 'Branch:   %s\n' "$wt_branch"
 fi
+printf 'Preset:   %s\n' "$wt_project_config"
 printf 'Routes:\n'
 printf '  frontend  %s\n' "$frontend_url"
-printf '  backend   %s\n' "$backend_url"
-printf '  storybook %s\n' "$storybook_url"
+if [[ "$wt_project_config" == "fullstack" ]]; then
+  printf '  backend   %s\n' "$backend_url"
+  printf '  storybook %s\n' "$storybook_url"
+fi
 
 if command -v portless >/dev/null 2>&1; then
   routes="$(NO_COLOR=1 portless list 2>/dev/null || true)"
-  active_lines="$(printf '%s\n' "$routes" | awk -v u1="$frontend_url" -v u2="$backend_url" -v u3="$storybook_url" 'index($0,u1) || index($0,u2) || index($0,u3) {print}')"
+  if [[ "$wt_project_config" == "fullstack" ]]; then
+    active_lines="$(printf '%s\n' "$routes" | awk -v u1="$frontend_url" -v u2="$backend_url" -v u3="$storybook_url" 'index($0,u1) || index($0,u2) || index($0,u3) {print}')"
+  else
+    active_lines="$(printf '%s\n' "$routes" | awk -v u1="$frontend_url" 'index($0,u1) {print}')"
+  fi
   if [[ -n "$active_lines" ]]; then
     printf '\nActive routes (portless):\n'
     printf '%s\n' "$active_lines"
