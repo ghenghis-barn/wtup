@@ -4,6 +4,14 @@ set -euo pipefail
 reset_session=0
 from_latest_main=0
 carry_changes=0
+workflow="auto"
+ds_target=""
+consumer_target=""
+ds_channel=""
+ds_link="source"
+consumer_kind="auto"
+no_prompt=0
+strict_workflow=0
 
 print_help() {
   cat <<'EOF' >&2
@@ -47,6 +55,45 @@ OPTIONS
     - Only supported between worktrees of the same repo.
     - Uses git stash internally; if apply conflicts, the stash is kept.
 
+  --workflow <auto|component-only|consumer-context>
+    Select an explicit workspace workflow.
+    - auto: current default behavior; one target worktree and existing
+      frontend/fullstack detection.
+    - component-only: aurora-ui DS work with Storybook v2 plus a components-v2
+      package shell.
+    - consumer-context: aurora-ui DS worktree plus one consumer app worktree.
+
+  --component-only
+    Alias for --workflow component-only.
+
+  --product-context
+    Alias for --workflow consumer-context.
+
+  --ds <aurora-target>
+    aurora-ui branch/path for component-only or consumer-context workflows.
+
+  --consumer <repo-target>
+    Consumer repo branch/path for consumer-context.
+
+  --dse <repo-target>
+    DSE-friendly alias for --consumer <repo-target> --consumer-kind dse.
+
+  --ds-channel <stable|alpha>
+    DS channel passed to consumer panes. Default for consumer-context: alpha.
+
+  --ds-link <source|snapshot>
+    DS link mode passed to consumer panes. Default: source.
+
+  --consumer-kind <auto|dse|frontend|fullstack>
+    Consumer preset hint. auto preserves existing frontend/fullstack detection.
+
+  --no-prompt
+    Do not prompt for missing workflow inputs; fail instead.
+
+  --strict-workflow
+    Fail instead of warning/falling back when requested workflow support is
+    missing.
+
   --help, -h, -help
     Show this help.
 
@@ -81,14 +128,18 @@ BEHAVIOR
     - EXITED sessions are deleted automatically (to avoid resurrecting stale
       layouts/commands).
 
-  - Windows Terminal (tools window)
-    If wt.exe/cmd.exe/wsl.exe are available, wtup opens a new Windows Terminal
-    window using profile WTUP_WT_PROFILE (default: aurora_wsl) and runs the
-    comma-separated commands from WTUP_WT_COMMANDS (default: omp,codex).
+  - Tools terminal
+    If wtup is run inside WezTerm (WEZTERM_PANE is set), the current tab becomes
+    the Zellij workspace and wtup opens the configured tools in a sibling
+    WezTerm tab rooted at the same worktree. Multiple tools are split inside
+    that tab.
+    Otherwise, if wt.exe/cmd.exe/wsl.exe are available, wtup opens a new Windows
+    Terminal window using profile WTUP_WT_PROFILE (default: aurora_wsl).
+    The tools are read from WTUP_TOOL_COMMANDS, falling back to WTUP_WT_COMMANDS,
+    then omp,codex.
     Examples:
       - claude,codex
       - omp,claude,codex
-    both rooted at the worktree directory.
 
 ENVIRONMENT VARIABLES
   Worktree creation
@@ -125,10 +176,19 @@ ENVIRONMENT VARIABLES
                          If unset, wtup picks a preset-specific default layout.
                          The frontend preset falls back to a built-in layout.
 
+  Tools terminal
+    WTUP_TERMINAL_BACKEND
+                         Tool terminal backend. Values: auto, wezterm,
+                         windows-terminal, none.
+                         Default: auto (wezterm inside WezTerm, otherwise
+                         Windows Terminal when available)
+    WTUP_TOOL_COMMANDS   Comma-separated commands to open in the tools context.
+                         Default: WTUP_WT_COMMANDS or omp,codex.
+
   Windows Terminal
     WTUP_WT_PROFILE      Windows Terminal profile name (or GUID).
                          Default: aurora_wsl
-    WTUP_WT_COMMANDS     Comma-separated commands to open in the tools window.
+    WTUP_WT_COMMANDS     Backward-compatible alias for WTUP_TOOL_COMMANDS.
                          Default: omp,codex
     WTUP_WIN_USER        Windows username (used to locate settings.json).
                          Default: autodetected via cmd.exe %USERNAME%
@@ -165,14 +225,23 @@ EXAMPLES
   # Frontend-only React workspace (single app pane + utility shells)
   WTUP_PROJECT_CONFIG=frontend wtup feat/ui-refresh
 
+  # aurora-ui DS-only workspace
+  wtup --component-only feat/components-refresh
+
+  # aurora-ui DS source validated inside a consumer app
+  wtup --product-context --ds feat/components-refresh --consumer ../consumer-app
+
+  # DSE alias for consumer-context
+  wtup --product-context --ds feat/components-refresh --dse ../design_system_evolution
+
   # Make a specific repo family auto-detect as frontend
   WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*' wtup .
 
-  # Use claude instead of omp in the tools window
-  WTUP_WT_COMMANDS=claude,codex wtup .
+  # Use claude instead of omp in the tools context
+  WTUP_TOOL_COMMANDS=claude,codex wtup .
 
-  # Open omp, claude, and codex in the tools window
-  WTUP_WT_COMMANDS=omp,claude,codex wtup .
+  # Open omp, claude, and codex in the tools context
+  WTUP_TOOL_COMMANDS=omp,claude,codex wtup .
 
 RELATED
   wtup-summary   Prints the routes + recent git history (Utility Bash pane uses this).
@@ -180,6 +249,7 @@ EOF
 }
 
 arg=""
+positional_args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reset|-r)
@@ -194,6 +264,108 @@ while [[ $# -gt 0 ]]; do
       carry_changes=1
       shift
       ;;
+    --workflow)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --workflow requires a value" >&2
+        exit 2
+      fi
+      workflow="$2"
+      shift 2
+      ;;
+    --workflow=*)
+      workflow="${1#*=}"
+      shift
+      ;;
+    --component-only)
+      workflow="component-only"
+      shift
+      ;;
+    --product-context|--consumer-context)
+      workflow="consumer-context"
+      shift
+      ;;
+    --ds)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --ds requires a value" >&2
+        exit 2
+      fi
+      ds_target="$2"
+      shift 2
+      ;;
+    --ds=*)
+      ds_target="${1#*=}"
+      shift
+      ;;
+    --consumer)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --consumer requires a value" >&2
+        exit 2
+      fi
+      consumer_target="$2"
+      shift 2
+      ;;
+    --consumer=*)
+      consumer_target="${1#*=}"
+      shift
+      ;;
+    --dse)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --dse requires a value" >&2
+        exit 2
+      fi
+      consumer_target="$2"
+      consumer_kind="dse"
+      shift 2
+      ;;
+    --dse=*)
+      consumer_target="${1#*=}"
+      consumer_kind="dse"
+      shift
+      ;;
+    --ds-channel)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --ds-channel requires a value" >&2
+        exit 2
+      fi
+      ds_channel="$2"
+      shift 2
+      ;;
+    --ds-channel=*)
+      ds_channel="${1#*=}"
+      shift
+      ;;
+    --ds-link)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --ds-link requires a value" >&2
+        exit 2
+      fi
+      ds_link="$2"
+      shift 2
+      ;;
+    --ds-link=*)
+      ds_link="${1#*=}"
+      shift
+      ;;
+    --consumer-kind)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --consumer-kind requires a value" >&2
+        exit 2
+      fi
+      consumer_kind="$2"
+      shift 2
+      ;;
+    --consumer-kind=*)
+      consumer_kind="${1#*=}"
+      shift
+      ;;
+    --no-prompt)
+      no_prompt=1
+      shift
+      ;;
+    --strict-workflow)
+      strict_workflow=1
+      shift
+      ;;
     --help|-h)
       print_help
       exit 0
@@ -204,17 +376,94 @@ while [[ $# -gt 0 ]]; do
       ;;
     --)
       shift
+      while [[ $# -gt 0 ]]; do
+        positional_args+=("$1")
+        shift
+      done
       break
       ;;
     *)
-      arg="$1"
+      positional_args+=("$1")
       shift
-      break
       ;;
   esac
 done
 
-if [[ -z "$arg" ]]; then
+case "$workflow" in
+  auto|component-only|consumer-context)
+    ;;
+  product-context)
+    workflow="consumer-context"
+    ;;
+  *)
+    echo "wtup: unknown workflow: $workflow (expected: auto, component-only, consumer-context)" >&2
+    exit 2
+    ;;
+esac
+
+case "$ds_channel" in
+  "")
+    if [[ "$workflow" == "consumer-context" ]]; then
+      ds_channel="alpha"
+    fi
+    ;;
+  stable|alpha)
+    ;;
+  *)
+    echo "wtup: unknown --ds-channel: $ds_channel (expected: stable or alpha)" >&2
+    exit 2
+    ;;
+esac
+
+case "$ds_link" in
+  source|snapshot)
+    ;;
+  *)
+    echo "wtup: unknown --ds-link: $ds_link (expected: source or snapshot)" >&2
+    exit 2
+    ;;
+esac
+
+case "$consumer_kind" in
+  auto|dse|frontend|fullstack)
+    ;;
+  *)
+    echo "wtup: unknown --consumer-kind: $consumer_kind (expected: auto, dse, frontend, fullstack)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$workflow" == "auto" ]]; then
+  if (( ${#positional_args[@]} > 1 )); then
+    echo "wtup: auto workflow accepts one target" >&2
+    exit 2
+  fi
+  if (( ${#positional_args[@]} == 1 )); then
+    arg="${positional_args[0]}"
+  fi
+elif [[ "$workflow" == "component-only" ]]; then
+  if [[ -z "$ds_target" ]] && (( ${#positional_args[@]} > 0 )); then
+    ds_target="${positional_args[0]}"
+  fi
+  if (( ${#positional_args[@]} > 1 )); then
+    echo "wtup: component-only accepts one aurora-ui target" >&2
+    exit 2
+  fi
+  arg="$ds_target"
+elif [[ "$workflow" == "consumer-context" ]]; then
+  if [[ -z "$ds_target" ]] && (( ${#positional_args[@]} > 0 )); then
+    ds_target="${positional_args[0]}"
+  fi
+  if [[ -z "$consumer_target" ]] && (( ${#positional_args[@]} > 1 )); then
+    consumer_target="${positional_args[1]}"
+  fi
+  if (( ${#positional_args[@]} > 2 )); then
+    echo "wtup: consumer-context accepts at most two positional targets: <ds-target> <consumer-target>" >&2
+    exit 2
+  fi
+fi
+
+if [[ "$workflow" == "auto" ]] && [[ -z "$arg" ]]; then
   echo "usage: wtup [--reset|-r] [--latest-main|-m] [--carry|-c] <worktree-branch-name|path-to-worktree>" >&2
   exit 2
 fi
@@ -327,6 +576,326 @@ detect_project_config() {
   printf 'fullstack'
 }
 
+prompt_for_required_target() {
+  local label="$1"
+  local value=""
+
+  if [[ "$no_prompt" == "1" ]]; then
+    echo "wtup: missing required $label target" >&2
+    return 1
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "wtup: missing required $label target and stdin is not interactive" >&2
+    return 1
+  fi
+
+  read -r -p "wtup $label target: " value
+  value="$(trim_whitespace "$value")"
+  if [[ -z "$value" ]]; then
+    echo "wtup: missing required $label target" >&2
+    return 1
+  fi
+
+  printf '%s' "$value"
+}
+
+is_aurora_ui_repo() {
+  local root="$1"
+  [[ -d "$root/packages/components-v2" && -d "$root/storybook-v2" ]]
+}
+
+repo_supports_ds_link_mode() {
+  local root="$1"
+  local link_mode="$2"
+  local pattern=""
+
+  case "$link_mode" in
+    source)
+      pattern='AURORA_UI_WORKTREE|AURORA_DS_LINK_MODE|AURORA_DS_COMPONENTS_SOURCE'
+      ;;
+    snapshot)
+      pattern='AURORA_DS_LINK_MODE|AURORA_DS_COMPONENTS_PACKAGE|AURORA_DS_SNAPSHOT'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$root" \
+      -g '!node_modules' -g '!dist' -g '!build' -g '!.git' 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+snapshot_artifacts_are_paired() {
+  local package_metadata="$1"
+  local storybook_metadata="$2"
+  local expected_channel="$3"
+
+  [[ -f "$package_metadata" && -f "$storybook_metadata" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  python3 - "$package_metadata" "$storybook_metadata" "$expected_channel" <<'PY'
+import json
+import sys
+
+package_path, storybook_path, expected_channel = sys.argv[1:4]
+
+try:
+    with open(package_path, encoding="utf-8") as f:
+        package = json.load(f)
+    with open(storybook_path, encoding="utf-8") as f:
+        storybook = json.load(f)
+except Exception:
+    sys.exit(1)
+
+package_id = package.get("designSystemSnapshotId")
+storybook_id = storybook.get("designSystemSnapshotId")
+package_channel = package.get("designSystemChannel")
+storybook_channel = storybook.get("designSystemChannel")
+
+if (
+    package_id
+    and storybook_id
+    and package_id == storybook_id
+    and package_channel == expected_channel
+    and storybook_channel == expected_channel
+):
+    sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+detect_consumer_kind() {
+  local consumer_root="$1"
+  local consumer_name="$2"
+  local explicit_kind="$3"
+  local detected_config=""
+
+  if [[ "$explicit_kind" != "auto" ]]; then
+    printf '%s' "$explicit_kind"
+    return
+  fi
+
+  case "$consumer_root:$consumer_name:$(basename "$consumer_root")" in
+    *design_system_evolution*|*dse*)
+      printf 'dse'
+      return
+      ;;
+  esac
+
+  detected_config="$(detect_project_config "$consumer_root" "$consumer_name")"
+  printf '%s' "$detected_config"
+}
+
+consumer_backend_detected() {
+  local consumer_root="$1"
+  local kind="$2"
+
+  if [[ "$kind" == "dse" || "$kind" == "fullstack" ]]; then
+    if [[ -d "$consumer_root/services/flexplorer-api/backend" ]] || [[ -f "$consumer_root/requirements.txt" ]]; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+repo_hint_for_consumer() {
+  local kind="$1"
+  local hint="${WTUP_CONSUMER_REPO_ROOT:-}"
+  local candidate=""
+
+  if [[ -n "$hint" ]]; then
+    printf '%s' "$hint"
+    return
+  fi
+
+  if [[ "$kind" == "dse" ]]; then
+    for candidate in \
+      "${WTUP_DSE_REPO_ROOT:-}" \
+      "$HOME/aurora_design/design_system/design_system_evolution" \
+      "$HOME/aurora_design/prototyping/design_system_evolution" \
+      "$HOME/aurora_design/worktrees/design_system_evolution"; do
+      if [[ -n "$candidate" ]] && git -C "$candidate" rev-parse --show-toplevel >/dev/null 2>&1; then
+        git -C "$candidate" rev-parse --show-toplevel
+        return
+      fi
+    done
+  fi
+}
+
+repo_hint_for_ds() {
+  local hint="${WTUP_DS_REPO_ROOT:-${WTUP_AURORA_UI_REPO_ROOT:-}}"
+  local cur_root=""
+
+  if [[ -n "$hint" ]]; then
+    printf '%s' "$hint"
+    return
+  fi
+
+  if cur_root="$(git rev-parse --show-toplevel 2>/dev/null)" && is_aurora_ui_repo "$cur_root"; then
+    printf '%s' "$cur_root"
+  fi
+}
+
+resolve_worktree_target() {
+  local target="$1"
+  local repo_hint="${2:-}"
+  local resolved_root=""
+  local resolved_name=""
+  local resolved_dir_name=""
+  local git_root=""
+  local cur_path=""
+  local cur_branch=""
+  local wt_branch=""
+  local wt_parent=""
+  local base_ref=""
+  local main_remote=""
+  local main_branch=""
+  local main_remote_ref=""
+  local remote_head=""
+  local fetch_failed=0
+  local counts=""
+  local left_count=""
+  local right_count=""
+  local base_sha=""
+  local main_sha=""
+
+  if [[ -z "$target" ]]; then
+    echo "wtup: internal error: resolve_worktree_target called without a target" >&2
+    return 2
+  fi
+
+  if [[ -d "$target" ]]; then
+    resolved_root="$(cd "$target" && pwd -P)"
+    if ! git -C "$resolved_root" rev-parse --show-toplevel >/dev/null 2>&1; then
+      echo "wtup: not a git worktree: $resolved_root" >&2
+      return 1
+    fi
+    resolved_root="$(git -C "$resolved_root" rev-parse --show-toplevel)"
+    wt_branch="$(git -C "$resolved_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [[ -n "$wt_branch" ]] && [[ "$wt_branch" != "HEAD" ]]; then
+      resolved_name="$wt_branch"
+    else
+      resolved_name="$(basename "$resolved_root")"
+    fi
+  else
+    resolved_name="$target"
+    resolved_dir_name="$(flatten_worktree_name "$resolved_name")"
+    if [[ -z "$resolved_dir_name" ]]; then
+      echo "wtup: could not derive a worktree directory name from: $resolved_name" >&2
+      return 1
+    fi
+
+    if [[ -n "$repo_hint" ]]; then
+      if ! git_root="$(git -C "$repo_hint" rev-parse --show-toplevel 2>/dev/null)"; then
+        echo "wtup: repo hint is not a git checkout: $repo_hint" >&2
+        return 1
+      fi
+    elif ! git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+      echo "wtup: run from inside any checkout/worktree of the target repo (or pass a worktree path)" >&2
+      return 1
+    fi
+
+    while IFS= read -r line; do
+      case "$line" in
+        worktree\ *)
+          cur_path="${line#worktree }"
+          cur_branch=""
+          ;;
+        branch\ refs/heads/*)
+          cur_branch="${line#branch refs/heads/}"
+          ;;
+        "")
+          if [[ "$cur_branch" == "$resolved_name" ]]; then
+            resolved_root="$cur_path"
+            break
+          fi
+          ;;
+      esac
+    done < <(git -C "$git_root" worktree list --porcelain; echo)
+
+    if [[ -z "$resolved_root" ]]; then
+      wt_parent="${WTUP_WORKTREES_DIR:-"$(dirname "$git_root")/worktrees"}"
+      resolved_root="${wt_parent}/${resolved_dir_name}"
+      base_ref="${WTUP_BASE_REF:-HEAD}"
+
+      main_remote="${WTUP_MAIN_REMOTE:-origin}"
+      main_branch="${WTUP_MAIN_BRANCH:-main}"
+
+      if git -C "$git_root" remote get-url "$main_remote" >/dev/null 2>&1; then
+        remote_head="$(git -C "$git_root" symbolic-ref --quiet "refs/remotes/${main_remote}/HEAD" 2>/dev/null || true)"
+        if [[ -n "$remote_head" ]]; then
+          main_remote_ref="${remote_head#refs/remotes/}"
+          main_remote="${main_remote_ref%%/*}"
+          main_branch="${main_remote_ref#*/}"
+        else
+          if ! git -C "$git_root" rev-parse --verify --quiet "refs/remotes/${main_remote}/${main_branch}" >/dev/null 2>&1; then
+            if git -C "$git_root" rev-parse --verify --quiet "refs/remotes/${main_remote}/master" >/dev/null 2>&1; then
+              main_branch="master"
+            fi
+          fi
+          main_remote_ref="${main_remote}/${main_branch}"
+        fi
+      else
+        main_remote_ref="${main_remote}/${main_branch}"
+      fi
+
+      fetch_failed=0
+      if git -C "$git_root" remote get-url "$main_remote" >/dev/null 2>&1; then
+        if ! GIT_TERMINAL_PROMPT=0 git -C "$git_root" fetch --quiet "$main_remote" "$main_branch" >/dev/null 2>&1; then
+          fetch_failed=1
+        fi
+      fi
+
+      if [[ "$from_latest_main" == "1" ]]; then
+        if [[ "$fetch_failed" == "1" ]]; then
+          echo "wtup: warning: failed to fetch ${main_remote}/${main_branch}; using local ${main_remote_ref} state" >&2
+        fi
+        if git -C "$git_root" rev-parse --verify --quiet "${main_remote_ref}^{commit}" >/dev/null 2>&1; then
+          base_ref="$main_remote_ref"
+        elif git -C "$git_root" show-ref --verify --quiet "refs/heads/${main_branch}"; then
+          echo "wtup: warning: ${main_remote_ref} not found; using local ${main_branch}" >&2
+          base_ref="$main_branch"
+        else
+          echo "wtup: error: cannot resolve ${main_remote_ref} (and no local ${main_branch}); cannot create from latest main" >&2
+          return 1
+        fi
+      else
+        if git -C "$git_root" rev-parse --verify --quiet "${main_remote_ref}^{commit}" >/dev/null 2>&1 && git -C "$git_root" rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null 2>&1; then
+          counts="$(git -C "$git_root" rev-list --left-right --count "${base_ref}...${main_remote_ref}" 2>/dev/null || true)"
+          read -r left_count right_count <<<"$counts" || true
+          if [[ -n "${right_count:-}" ]] && [[ "$right_count" != "0" ]]; then
+            base_sha="$(git -C "$git_root" rev-parse --short "${base_ref}^{commit}" 2>/dev/null || true)"
+            main_sha="$(git -C "$git_root" rev-parse --short "${main_remote_ref}^{commit}" 2>/dev/null || true)"
+            echo "wtup: warning: creating '$resolved_name' from ${base_ref} (${base_sha}), but ${main_remote_ref} is ahead by ${right_count} commit(s) (${main_sha})" >&2
+            echo "wtup: hint: use 'wtup --latest-main $resolved_name' to base on latest main" >&2
+          fi
+        fi
+      fi
+
+      mkdir -p "$wt_parent"
+      if [[ -e "$resolved_root" ]]; then
+        echo "wtup: error: target worktree path already exists: $resolved_root" >&2
+        echo "wtup: hint: an existing branch may already map to the same flattened path" >&2
+        return 1
+      fi
+
+      if git -C "$git_root" show-ref --verify --quiet "refs/heads/${resolved_name}"; then
+        git -C "$git_root" worktree add "$resolved_root" "$resolved_name" >&2
+      else
+        git -C "$git_root" worktree add -b "$resolved_name" "$resolved_root" "$base_ref" >&2
+      fi
+    fi
+  fi
+
+  printf '%s\t%s\n' "$resolved_root" "$resolved_name"
+}
+
 escape_kdl_string() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -395,6 +964,138 @@ layout {
 EOF
 }
 
+write_builtin_component_only_layout() {
+  local dst="$1"
+  local worktree_title="$2"
+  local escaped_title
+
+  escaped_title="$(escape_kdl_string "$worktree_title")"
+
+  cat > "$dst" <<EOF
+layout {
+    cwd "."
+    tab name="[DS] - ${escaped_title}" focus=true hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane command="wtup-utility" name="DS Summary" cwd="." focus=true size="36%" {
+            }
+            pane split_direction="horizontal" size="64%" {
+                pane command="wtup-pane" name="[DS]---Storybook v2" cwd="." size="58%" {
+                    args "ds-storybook"
+                }
+                pane command="wtup-pane" name="[DS]---components-v2" cwd="." size="42%" {
+                    args "ds-components"
+                }
+            }
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="Nvim" hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane command="nvim" cwd="." {
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    new_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane cwd="."
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+}
+EOF
+}
+
+write_builtin_consumer_context_layout() {
+  local dst="$1"
+  local worktree_title="$2"
+  local ds_root_arg="$3"
+  local consumer_root_arg="$4"
+  local include_backend="$5"
+  local escaped_title
+  local escaped_ds_root
+  local escaped_consumer_root
+  local backend_pane=""
+  local ds_storybook_size="36%"
+  local consumer_app_size="36%"
+  local utility_size="28%"
+
+  escaped_title="$(escape_kdl_string "$worktree_title")"
+  escaped_ds_root="$(escape_kdl_string "$ds_root_arg")"
+  escaped_consumer_root="$(escape_kdl_string "$consumer_root_arg")"
+
+  if [[ "$include_backend" == "1" ]]; then
+    ds_storybook_size="30%"
+    consumer_app_size="30%"
+    utility_size="20%"
+    backend_pane=$(cat <<EOF_BACKEND
+                pane command="wtup-pane" name="[Consumer]---Backend" cwd="${escaped_consumer_root}" size="20%" {
+                    args "consumer-backend"
+                }
+EOF_BACKEND
+)
+  fi
+
+  cat > "$dst" <<EOF
+layout {
+    cwd "${escaped_ds_root}"
+    tab name="[DS+App] - ${escaped_title}" focus=true hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane command="wtup-utility" name="DS Consumer Summary" cwd="${escaped_ds_root}" focus=true size="34%" {
+            }
+            pane split_direction="horizontal" size="66%" {
+                pane command="wtup-pane" name="[DS]---Storybook v2" cwd="${escaped_ds_root}" size="${ds_storybook_size}" {
+                    args "ds-storybook"
+                }
+                pane command="wtup-pane" name="[Consumer]---App" cwd="${escaped_consumer_root}" size="${consumer_app_size}" {
+                    args "consumer-app"
+                }
+${backend_pane}
+                pane command="bash" name="Utility Bash" cwd="${escaped_consumer_root}" size="${utility_size}" {
+                }
+            }
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="Nvim" hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane command="nvim" cwd="${escaped_ds_root}" {
+        }
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    new_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane cwd="${escaped_ds_root}"
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+}
+EOF
+}
+
 append_windows_terminal_command() {
   local mode="$1"
   local agent_cmd="$2"
@@ -428,12 +1129,110 @@ append_windows_terminal_command() {
   cmd+=(--cd "$wt_root" -- bash -ic "exec ${escaped_cmd}")
 }
 
+windows_terminal_available() {
+  command -v cmd.exe >/dev/null 2>&1 &&
+    command -v wt.exe >/dev/null 2>&1 &&
+    command -v wsl.exe >/dev/null 2>&1
+}
+
+wezterm_tab_backend_available() {
+  [[ -n "${WEZTERM_PANE:-}" ]] && command -v wezterm >/dev/null 2>&1
+}
+
+spawn_wezterm_agent_command() {
+  local mode="$1"
+  local target_pane="$2"
+  local agent_cmd="$3"
+  local escaped_cmd
+
+  escaped_cmd="$(escape_bash_double_quoted "$agent_cmd")"
+
+  case "$mode" in
+    new-tab)
+      wezterm cli spawn --pane-id "$WEZTERM_PANE" --cwd "$wt_root" -- bash -ic "exec ${escaped_cmd}"
+      ;;
+    split-pane)
+      wezterm cli split-pane --pane-id "$target_pane" --right --cwd "$wt_root" -- bash -ic "exec ${escaped_cmd}"
+      ;;
+    *)
+      echo "wtup: unsupported WezTerm mode: $mode" >&2
+      return 1
+      ;;
+  esac
+}
+
+launch_wezterm_tools_tab() {
+  local first_pane
+  local split_pane
+  local i
+
+  if (( ${#wt_agent_commands[@]} == 0 )); then
+    return 0
+  fi
+
+  if ! first_pane="$(spawn_wezterm_agent_command new-tab "" "${wt_agent_commands[0]}" 2>/dev/null)"; then
+    return 1
+  fi
+  first_pane="${first_pane//$'\r'/}"
+  first_pane="$(trim_whitespace "$first_pane")"
+  if [[ -z "$first_pane" ]]; then
+    return 1
+  fi
+
+  wezterm cli set-tab-title --pane-id "$first_pane" "${wt_name} tools" >/dev/null 2>&1 || true
+
+  for i in "${!wt_agent_commands[@]}"; do
+    if (( i == 0 )); then
+      continue
+    fi
+    if ! split_pane="$(spawn_wezterm_agent_command split-pane "$first_pane" "${wt_agent_commands[i]}" 2>/dev/null)"; then
+      echo "wtup: warning: failed to open WezTerm tools pane for: ${wt_agent_commands[i]}" >&2
+      continue
+    fi
+    split_pane="${split_pane//$'\r'/}"
+  done
+
+  if [[ -n "${WEZTERM_PANE:-}" ]]; then
+    wezterm cli activate-pane --pane-id "$WEZTERM_PANE" >/dev/null 2>&1 || true
+  fi
+}
+
+resolve_terminal_backend() {
+  local requested="$1"
+
+  case "$requested" in
+    ""|auto)
+      if wezterm_tab_backend_available; then
+        printf 'wezterm'
+      elif windows_terminal_available; then
+        printf 'windows-terminal'
+      else
+        printf 'none'
+      fi
+      ;;
+    wezterm)
+      printf 'wezterm'
+      ;;
+    windows-terminal|windows_terminal|windows|wt)
+      printf 'windows-terminal'
+      ;;
+    none|off|0|false)
+      printf 'none'
+      ;;
+    *)
+      echo "wtup: unknown WTUP_TERMINAL_BACKEND: $requested (expected: auto, wezterm, windows-terminal, none)" >&2
+      return 2
+      ;;
+  esac
+}
+
 wt_profile="${WTUP_WT_PROFILE:-aurora_wsl}"
+wt_terminal_backend="${WTUP_TERMINAL_BACKEND:-auto}"
 wt_project_config=""
 wt_layout=""
 
 wt_agent_commands=()
-IFS=',' read -r -a wt_agent_tokens <<< "${WTUP_WT_COMMANDS:-omp,codex}"
+IFS=',' read -r -a wt_agent_tokens <<< "${WTUP_TOOL_COMMANDS:-${WTUP_WT_COMMANDS:-omp,codex}}"
 for token in "${wt_agent_tokens[@]}"; do
   token="$(trim_whitespace "$token")"
   if [[ -n "$token" ]]; then
@@ -444,131 +1243,130 @@ done
 wt_root=""
 wt_name=""
 wt_dir_name=""
+ds_root=""
+ds_name=""
+consumer_root=""
+consumer_name=""
+consumer_detected_kind=""
+consumer_has_backend=0
+ds_host=""
+consumer_host=""
+resolved_line=""
 
-if [[ -d "$arg" ]]; then
-  wt_root="$(cd "$arg" && pwd -P)"
-  if ! git -C "$wt_root" rev-parse --show-toplevel >/dev/null 2>&1; then
-    echo "wtup: not a git worktree: $wt_root" >&2
+if [[ "$workflow" == "component-only" ]]; then
+  if [[ -z "$ds_target" ]]; then
+    if ! ds_target="$(prompt_for_required_target "aurora-ui")"; then
+      exit 1
+    fi
+  fi
+  ds_repo_hint="$(repo_hint_for_ds || true)"
+  IFS=$'\t' read -r ds_root ds_name < <(resolve_worktree_target "$ds_target" "$ds_repo_hint")
+  if [[ -z "$ds_root" || -z "$ds_name" ]]; then
     exit 1
   fi
-  wt_branch="$(git -C "$wt_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  if [[ -n "$wt_branch" ]] && [[ "$wt_branch" != "HEAD" ]]; then
-    wt_name="$wt_branch"
+  if ! is_aurora_ui_repo "$ds_root"; then
+    if [[ "$strict_workflow" == "1" || "$no_prompt" == "1" ]]; then
+      echo "wtup: component-only requires an aurora-ui worktree with packages/components-v2 and storybook-v2: $ds_root" >&2
+      exit 1
+    fi
+    echo "wtup: warning: component-only support not found at $ds_root; falling back to auto workflow" >&2
+    workflow="auto"
+    arg="$ds_root"
   else
-    wt_name="$(basename "$wt_root")"
+    wt_root="$ds_root"
+    wt_name="$ds_name"
   fi
-else
-  wt_name="$arg"
-  wt_dir_name="$(flatten_worktree_name "$wt_name")"
-  if [[ -z "$wt_dir_name" ]]; then
-    echo "wtup: could not derive a worktree directory name from: $wt_name" >&2
+fi
+
+if [[ "$workflow" == "consumer-context" ]]; then
+  if [[ -z "$ds_target" ]]; then
+    if ! ds_target="$(prompt_for_required_target "aurora-ui")"; then
+      exit 1
+    fi
+  fi
+  if [[ -z "$consumer_target" ]]; then
+    if ! consumer_target="$(prompt_for_required_target "consumer")"; then
+      exit 1
+    fi
+  fi
+
+  ds_repo_hint="$(repo_hint_for_ds || true)"
+  IFS=$'\t' read -r ds_root ds_name < <(resolve_worktree_target "$ds_target" "$ds_repo_hint")
+  if [[ -z "$ds_root" || -z "$ds_name" ]]; then
     exit 1
   fi
-  if ! git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-    echo "wtup: run from inside any checkout/worktree of the target repo (or pass a worktree path)" >&2
-    exit 1
-  fi
-
-  wt_root=""
-  cur_path=""
-  cur_branch=""
-  while IFS= read -r line; do
-    case "$line" in
-      worktree\ *)
-        cur_path="${line#worktree }"
-        cur_branch=""
-        ;;
-      branch\ refs/heads/*)
-        cur_branch="${line#branch refs/heads/}"
-        ;;
-      "")
-        if [[ "$cur_branch" == "$wt_name" ]]; then
-          wt_root="$cur_path"
-          break
-        fi
-        ;;
-    esac
-  done < <(git -C "$git_root" worktree list --porcelain; echo)
-
-  if [[ -z "$wt_root" ]]; then
-    wt_parent="${WTUP_WORKTREES_DIR:-"$(dirname "$git_root")/worktrees"}"
-    wt_root="${wt_parent}/${wt_dir_name}"
-    base_ref="${WTUP_BASE_REF:-HEAD}"
-
-    # Resolve the "main" ref used for --latest-main and stale-base warnings.
-    # Default: origin/main, but we will:
-    # - Prefer origin/HEAD if it exists
-    # - Fall back to origin/master if origin/main is missing
-    main_remote="${WTUP_MAIN_REMOTE:-origin}"
-    main_branch="${WTUP_MAIN_BRANCH:-main}"
-
-    if git -C "$git_root" remote get-url "$main_remote" >/dev/null 2>&1; then
-      remote_head="$(git -C "$git_root" symbolic-ref --quiet "refs/remotes/${main_remote}/HEAD" 2>/dev/null || true)"
-      if [[ -n "$remote_head" ]]; then
-        main_remote_ref="${remote_head#refs/remotes/}"
-        main_remote="${main_remote_ref%%/*}"
-        main_branch="${main_remote_ref#*/}"
-      else
-        if ! git -C "$git_root" rev-parse --verify --quiet "refs/remotes/${main_remote}/${main_branch}" >/dev/null 2>&1; then
-          if git -C "$git_root" rev-parse --verify --quiet "refs/remotes/${main_remote}/master" >/dev/null 2>&1; then
-            main_branch="master"
-          fi
-        fi
-        main_remote_ref="${main_remote}/${main_branch}"
-      fi
-    else
-      main_remote_ref="${main_remote}/${main_branch}"
+  if ! is_aurora_ui_repo "$ds_root"; then
+    if [[ "$strict_workflow" == "1" || "$no_prompt" == "1" ]]; then
+      echo "wtup: consumer-context requires --ds to resolve to aurora-ui with packages/components-v2 and storybook-v2: $ds_root" >&2
+      exit 1
     fi
-
-    # Best-effort fetch so "latest" is actually latest.
-    fetch_failed=0
-    if git -C "$git_root" remote get-url "$main_remote" >/dev/null 2>&1; then
-      if ! GIT_TERMINAL_PROMPT=0 git -C "$git_root" fetch --quiet "$main_remote" "$main_branch" >/dev/null 2>&1; then
-        fetch_failed=1
+    echo "wtup: warning: DS workflow support not found at $ds_root; falling back to auto workflow for $ds_root" >&2
+    workflow="auto"
+    arg="$ds_root"
+  else
+    consumer_repo_hint="$(repo_hint_for_consumer "$consumer_kind" || true)"
+    if [[ -z "$consumer_repo_hint" && ! -d "$consumer_target" ]]; then
+      cur_repo_hint="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -n "$cur_repo_hint" ]] && [[ "$(realpath -m "$cur_repo_hint")" != "$(realpath -m "$ds_root")" ]]; then
+        consumer_repo_hint="$cur_repo_hint"
       fi
     fi
-
-    if [[ "$from_latest_main" == "1" ]]; then
-      if [[ "$fetch_failed" == "1" ]]; then
-        echo "wtup: warning: failed to fetch ${main_remote}/${main_branch}; using local ${main_remote_ref} state" >&2
-      fi
-      if git -C "$git_root" rev-parse --verify --quiet "${main_remote_ref}^{commit}" >/dev/null 2>&1; then
-        base_ref="$main_remote_ref"
-      elif git -C "$git_root" show-ref --verify --quiet "refs/heads/${main_branch}" >/dev/null 2>&1; then
-        echo "wtup: warning: ${main_remote_ref} not found; using local ${main_branch}" >&2
-        base_ref="$main_branch"
-      else
-        echo "wtup: error: cannot resolve ${main_remote_ref} (and no local ${main_branch}); cannot create from latest main" >&2
-        exit 1
-      fi
-    else
-      # Warn when creating a new worktree from a base that does not include latest main.
-      if git -C "$git_root" rev-parse --verify --quiet "${main_remote_ref}^{commit}" >/dev/null 2>&1 && git -C "$git_root" rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null 2>&1; then
-        counts="$(git -C "$git_root" rev-list --left-right --count "${base_ref}...${main_remote_ref}" 2>/dev/null || true)"
-        left_count=""
-        right_count=""
-        read -r left_count right_count <<<"$counts" || true
-        if [[ -n "${right_count:-}" ]] && [[ "$right_count" != "0" ]]; then
-          base_sha="$(git -C "$git_root" rev-parse --short "${base_ref}^{commit}" 2>/dev/null || true)"
-          main_sha="$(git -C "$git_root" rev-parse --short "${main_remote_ref}^{commit}" 2>/dev/null || true)"
-          echo "wtup: warning: creating '$wt_name' from ${base_ref} (${base_sha}), but ${main_remote_ref} is ahead by ${right_count} commit(s) (${main_sha})" >&2
-          echo "wtup: hint: use 'wtup --latest-main $wt_name' to base on latest main" >&2
-        fi
-      fi
+    if [[ -z "$consumer_repo_hint" && ! -d "$consumer_target" ]]; then
+      echo "wtup: error: --consumer must be an existing worktree path, or set WTUP_CONSUMER_REPO_ROOT for branch targets" >&2
+      exit 1
     fi
-
-    mkdir -p "$wt_parent"
-    if [[ -e "$wt_root" ]]; then
-      echo "wtup: error: target worktree path already exists: $wt_root" >&2
-      echo "wtup: hint: an existing branch may already map to the same flattened path" >&2
+    IFS=$'\t' read -r consumer_root consumer_name < <(resolve_worktree_target "$consumer_target" "$consumer_repo_hint")
+    if [[ -z "$consumer_root" || -z "$consumer_name" ]]; then
       exit 1
     fi
 
-    if git -C "$git_root" show-ref --verify --quiet "refs/heads/${wt_name}"; then
-      git -C "$git_root" worktree add "$wt_root" "$wt_name"
-    else
-      git -C "$git_root" worktree add -b "$wt_name" "$wt_root" "$base_ref"
+    consumer_detected_kind="$(detect_consumer_kind "$consumer_root" "$consumer_name" "$consumer_kind")"
+    if ! repo_supports_ds_link_mode "$consumer_root" "$ds_link"; then
+      if [[ "$strict_workflow" == "1" || "$no_prompt" == "1" ]]; then
+        echo "wtup: consumer repo does not advertise DS $ds_link linking support: $consumer_root" >&2
+        exit 1
+      fi
+      echo "wtup: warning: consumer repo does not advertise DS $ds_link linking support; launching with environment wiring only" >&2
     fi
+
+    if [[ "$ds_link" == "snapshot" ]]; then
+      snapshot_package="${ds_root}/packages/components-v2/dist/${ds_channel}-package"
+      snapshot_metadata="${ds_root}/storybook-v2/storybook-static/design-system-snapshot.json"
+      snapshot_package_metadata="${snapshot_package}/design-system-snapshot.json"
+      if [[ ! -e "$snapshot_package" || ! -f "$snapshot_metadata" ]]; then
+        if [[ "$strict_workflow" == "1" || "$no_prompt" == "1" ]]; then
+          echo "wtup: snapshot mode requires package and Storybook metadata artifacts for channel '$ds_channel'" >&2
+          echo "wtup: expected package:  $snapshot_package" >&2
+          echo "wtup: expected metadata: $snapshot_metadata" >&2
+          exit 1
+        fi
+        echo "wtup: warning: snapshot artifacts for channel '$ds_channel' are missing; launch will still expose the expected artifact paths" >&2
+      elif ! snapshot_artifacts_are_paired "$snapshot_package_metadata" "$snapshot_metadata" "$ds_channel"; then
+        if [[ "$strict_workflow" == "1" || "$no_prompt" == "1" ]]; then
+          echo "wtup: snapshot mode requires package and Storybook metadata to share one '$ds_channel' snapshot ID" >&2
+          echo "wtup: package metadata:  $snapshot_package_metadata" >&2
+          echo "wtup: storybook metadata: $snapshot_metadata" >&2
+          exit 1
+        fi
+        echo "wtup: warning: snapshot package and Storybook metadata do not share one '$ds_channel' snapshot ID; rerun yarn design-system:snapshot:$ds_channel for a paired snapshot" >&2
+      fi
+    fi
+
+    if consumer_backend_detected "$consumer_root" "$consumer_detected_kind"; then
+      consumer_has_backend=1
+    fi
+
+    ds_host="$(slugify "$ds_name")"
+    consumer_host="$(slugify "$consumer_name")"
+    wt_root="$ds_root"
+    wt_name="${ds_name}+${consumer_name}"
+  fi
+fi
+
+if [[ "$workflow" == "auto" ]]; then
+  IFS=$'\t' read -r wt_root wt_name < <(resolve_worktree_target "$arg" "")
+  if [[ -z "$wt_root" || -z "$wt_name" ]]; then
+    exit 1
   fi
 fi
 
@@ -578,19 +1376,27 @@ if [[ -z "$wt_host" ]]; then
   exit 1
 fi
 
-wt_project_config="$(detect_project_config "$wt_root" "$wt_name")"
-case "$wt_project_config" in
-  fullstack)
-    default_layout="prototyping_portless"
-    ;;
-  frontend)
-    default_layout="wtup_frontend"
-    ;;
-  *)
-    echo "wtup: unknown WTUP_PROJECT_CONFIG: $wt_project_config (expected: fullstack or frontend)" >&2
-    exit 2
-    ;;
-esac
+if [[ "$workflow" == "auto" ]]; then
+  wt_project_config="$(detect_project_config "$wt_root" "$wt_name")"
+  case "$wt_project_config" in
+    fullstack)
+      default_layout="prototyping_portless"
+      ;;
+    frontend)
+      default_layout="wtup_frontend"
+      ;;
+    *)
+      echo "wtup: unknown WTUP_PROJECT_CONFIG: $wt_project_config (expected: fullstack or frontend)" >&2
+      exit 2
+      ;;
+  esac
+elif [[ "$workflow" == "component-only" ]]; then
+  wt_project_config="component-only"
+  default_layout="wtup_component_only"
+else
+  wt_project_config="consumer-context"
+  default_layout="wtup_consumer_context"
+fi
 wt_layout="${WTUP_ZELLIJ_LAYOUT:-$default_layout}"
 
 if [[ "$carry_changes" == "1" ]]; then
@@ -655,8 +1461,18 @@ if [[ "$carry_changes" == "1" ]]; then
   fi
 fi
 
-# Open separate Windows Terminal window with configured tool commands (WSL)
-if command -v cmd.exe >/dev/null 2>&1 && command -v wt.exe >/dev/null 2>&1 && command -v wsl.exe >/dev/null 2>&1 && (( ${#wt_agent_commands[@]} > 0 )); then
+tools_backend="$(resolve_terminal_backend "$wt_terminal_backend")"
+
+# Open configured tool commands in a sibling terminal context.
+if [[ "$tools_backend" == "wezterm" ]] && (( ${#wt_agent_commands[@]} > 0 )); then
+  if wezterm_tab_backend_available; then
+    if ! launch_wezterm_tools_tab; then
+      echo "wtup: warning: failed to open WezTerm tools tab" >&2
+    fi
+  else
+    echo "wtup: warning: WezTerm backend requested but wtup is not running inside WezTerm" >&2
+  fi
+elif [[ "$tools_backend" == "windows-terminal" ]] && (( ${#wt_agent_commands[@]} > 0 )) && windows_terminal_available; then
   distro="${WSL_DISTRO_NAME:-}"
 
   # Resolve the profile to a GUID to avoid duplicates (eg. hidden WSL auto-profiles)
@@ -723,12 +1539,46 @@ cd "$wt_root"
 export WORKTREE_NAME="$wt_name"
 export WORKTREE_HOST="$wt_host"
 export WTUP_PROJECT_CONFIG="$wt_project_config"
+export WTUP_WORKFLOW="$workflow"
+
+if [[ "$workflow" == "component-only" || "$workflow" == "consumer-context" ]]; then
+  if [[ -z "$ds_channel" ]]; then
+    ds_channel="alpha"
+  fi
+  if [[ -z "$ds_host" ]]; then
+    ds_host="$(slugify "$ds_name")"
+  fi
+
+  export AURORA_UI_WORKTREE="$ds_root"
+  export AURORA_DS_WORKTREE="$ds_root"
+  export AURORA_DS_WORKTREE_HOST="$ds_host"
+  export AURORA_DS_CHANNEL="$ds_channel"
+  export AURORA_DS_LINK_MODE="$ds_link"
+  export AURORA_DS_COMPONENTS_SOURCE="${ds_root}/packages/components-v2/src"
+  export AURORA_DS_COMPONENTS_PACKAGE="${ds_root}/packages/components-v2/dist/${ds_channel}-package"
+  export AURORA_DS_STORYBOOK_STATIC="${ds_root}/storybook-v2/storybook-static"
+  export AURORA_DS_SNAPSHOT="${ds_root}/storybook-v2/storybook-static/design-system-snapshot.json"
+fi
+
+if [[ "$workflow" == "consumer-context" ]]; then
+  export AURORA_CONSUMER_WORKTREE="$consumer_root"
+  export AURORA_CONSUMER_WORKTREE_HOST="$consumer_host"
+  export AURORA_CONSUMER_KIND="$consumer_detected_kind"
+fi
 
 # Generate a per-worktree layout so the first tab name is correct without runtime renames
 layout_arg="$wt_layout"
 layout_src="${HOME}/.config/zellij/layouts/${wt_layout}.kdl"
 layout_out="${HOME}/.cache/wtup/layouts/${wt_host}.kdl"
-if [[ "$wt_project_config" == "frontend" ]] && [[ "$wt_layout" == "$default_layout" ]] && [[ ! -f "$layout_src" ]]; then
+if [[ "$workflow" == "component-only" ]] && [[ "$wt_layout" == "$default_layout" ]]; then
+  mkdir -p "$(dirname "$layout_out")"
+  write_builtin_component_only_layout "$layout_out" "$wt_name"
+  layout_arg="$layout_out"
+elif [[ "$workflow" == "consumer-context" ]] && [[ "$wt_layout" == "$default_layout" ]]; then
+  mkdir -p "$(dirname "$layout_out")"
+  write_builtin_consumer_context_layout "$layout_out" "$wt_name" "$ds_root" "$consumer_root" "$consumer_has_backend"
+  layout_arg="$layout_out"
+elif [[ "$wt_project_config" == "frontend" ]] && [[ "$wt_layout" == "$default_layout" ]] && [[ ! -f "$layout_src" ]]; then
   mkdir -p "$(dirname "$layout_out")"
   write_builtin_frontend_layout "$layout_out" "$wt_name"
   layout_arg="$layout_out"
@@ -761,6 +1611,10 @@ with open(dst, 'w', encoding='utf-8', newline='\n') as f:
     f.write(data)
 PY
   layout_arg="$layout_out"
+fi
+
+if [[ "$tools_backend" == "wezterm" ]] && [[ -n "${WEZTERM_PANE:-}" ]]; then
+  wezterm cli set-tab-title --pane-id "$WEZTERM_PANE" "${wt_name} zellij" >/dev/null 2>&1 || true
 fi
 
 if [[ "$reset_session" == "1" ]]; then

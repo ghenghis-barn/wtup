@@ -3,7 +3,7 @@ set -euo pipefail
 
 role="${1:-}"
 if [[ -z "$role" ]]; then
-  echo "usage: wtup-pane <backend|frontend|storybook|app>" >&2
+  echo "usage: wtup-pane <backend|frontend|storybook|app|ds-storybook|ds-components|consumer-app|consumer-backend>" >&2
   exit 2
 fi
 
@@ -68,6 +68,12 @@ frontend_origin="$(fmt_origin "${wt_host}.localhost")"
 backend_origin="$(fmt_origin "flexplorer-api.${wt_host}.localhost")"
 storybook_origin="$(fmt_origin "storybook.${wt_host}.localhost")"
 
+ds_host="${AURORA_DS_WORKTREE_HOST:-$wt_host}"
+consumer_host="${AURORA_CONSUMER_WORKTREE_HOST:-$wt_host}"
+ds_storybook_origin="$(fmt_origin "storybook.${ds_host}.localhost")"
+consumer_frontend_origin="$(fmt_origin "${consumer_host}.localhost")"
+consumer_backend_origin="$(fmt_origin "flexplorer-api.${consumer_host}.localhost")"
+
 resolve_frontend_run_command() {
   if [[ -n "${WTUP_FRONTEND_RUN_COMMAND:-}" ]]; then
     printf '%s' "${WTUP_FRONTEND_RUN_COMMAND}"
@@ -100,7 +106,16 @@ escape_bash_double_quoted() {
 }
 
 case "$role" in
-  backend)
+  backend|consumer-backend)
+    backend_portless_host="flexplorer-api.${wt_host}"
+    backend_allowed_frontend_origin="$frontend_origin"
+    backend_allowed_storybook_origin="$storybook_origin"
+    if [[ "$role" == "consumer-backend" ]]; then
+      backend_portless_host="flexplorer-api.${consumer_host}"
+      backend_allowed_frontend_origin="$consumer_frontend_origin"
+      backend_allowed_storybook_origin="$ds_storybook_origin"
+    fi
+
     # Backend bootstrap for clean worktrees:
     # - ensure venv
     # - install requirements
@@ -140,9 +155,9 @@ case "$role" in
       echo "[wtup] backend: warning: requirements.txt not found; skipping install" >&2
     fi
 
-    FLEXPLORER_ALLOWED_ORIGINS="${frontend_origin},${storybook_origin}" \
+    FLEXPLORER_ALLOWED_ORIGINS="${backend_allowed_frontend_origin},${backend_allowed_storybook_origin}" \
       FLEXPLORER_API_BASE_PATH= API_BASE_PATH= FLEXPLORER_BASE_PATH= \
-      exec portless "flexplorer-api.${wt_host}" bash -lc 'exec .venv/bin/python -m uvicorn main:app --reload --host "$HOST" --port "$PORT"'
+      exec portless "$backend_portless_host" bash -lc 'exec .venv/bin/python -m uvicorn main:app --reload --host "$HOST" --port "$PORT"'
     ;;
   frontend)
     if [[ -x ./node_modules/.bin/vite ]]; then
@@ -162,10 +177,61 @@ case "$role" in
         exec portless "storybook.${wt_host}" bash -ic 'exec storybook dev -p "$PORT" --host "$HOST"'
     fi
     ;;
-  app)
+  app|consumer-app)
+    app_portless_host="$wt_host"
+    app_backend_origin="$backend_origin"
+    if [[ "$role" == "consumer-app" ]]; then
+      app_portless_host="$consumer_host"
+      app_backend_origin="$consumer_backend_origin"
+    fi
     frontend_run_command="$(resolve_frontend_run_command)"
     frontend_run_command="$(escape_bash_double_quoted "$frontend_run_command")"
-    exec portless "${wt_host}" bash -lc "exec ${frontend_run_command}"
+    VITE_FLEXPLORER_API_ORIGIN="$app_backend_origin" VITE_EXPLORER_API_ORIGIN="$app_backend_origin" \
+      exec portless "$app_portless_host" bash -lc "exec ${frontend_run_command}"
+    ;;
+  ds-storybook)
+    if [[ -n "${AURORA_UI_WORKTREE:-}" && -d "${AURORA_UI_WORKTREE:-}" ]]; then
+      cd "$AURORA_UI_WORKTREE"
+    elif command -v git >/dev/null 2>&1; then
+      repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -n "$repo_root" ]]; then
+        cd "$repo_root"
+      fi
+    fi
+
+    if [[ ! -d storybook-v2 ]]; then
+      echo "[wtup] ds-storybook: storybook-v2 not found in $(pwd)" >&2
+      exit 1
+    fi
+
+    exec portless "storybook.${ds_host}" bash -lc 'exec yarn workspace @aurora-ui/storybook-v2 run storybook -- -p "$PORT" --host "$HOST"'
+    ;;
+  ds-components)
+    if [[ -n "${AURORA_UI_WORKTREE:-}" && -d "${AURORA_UI_WORKTREE:-}" ]]; then
+      cd "$AURORA_UI_WORKTREE"
+    elif command -v git >/dev/null 2>&1; then
+      repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+      if [[ -n "$repo_root" ]]; then
+        cd "$repo_root"
+      fi
+    fi
+
+    if [[ ! -d packages/components-v2 ]]; then
+      echo "[wtup] ds-components: packages/components-v2 not found in $(pwd)" >&2
+      exit 1
+    fi
+
+    cd packages/components-v2
+    if [[ -n "${WTUP_DS_COMPONENTS_COMMAND:-}" ]]; then
+      ds_components_command="$(escape_bash_double_quoted "$WTUP_DS_COMPONENTS_COMMAND")"
+      exec bash -lc "exec ${ds_components_command}"
+    fi
+
+    printf '[wtup] components-v2 package shell\n'
+    printf 'source:   %s\n' "${AURORA_DS_COMPONENTS_SOURCE:-$(pwd)/src}"
+    printf 'package:  %s\n' "${AURORA_DS_COMPONENTS_PACKAGE:-$(pwd)/dist/alpha-package}"
+    printf 'storybook %s\n' "$ds_storybook_origin"
+    exec bash -i
     ;;
   *)
     echo "unknown role: $role" >&2

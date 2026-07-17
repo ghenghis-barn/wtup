@@ -163,10 +163,18 @@ fmt_url() {
 frontend_host="${wt_host}.localhost"
 backend_host="flexplorer-api.${wt_host}.localhost"
 storybook_host="storybook.${wt_host}.localhost"
+ds_host="${AURORA_DS_WORKTREE_HOST:-$wt_host}"
+consumer_host="${AURORA_CONSUMER_WORKTREE_HOST:-$wt_host}"
+ds_storybook_host="storybook.${ds_host}.localhost"
+consumer_frontend_host="${consumer_host}.localhost"
+consumer_backend_host="flexplorer-api.${consumer_host}.localhost"
 
 frontend_url="$(fmt_url "$frontend_host")"
 backend_url="$(fmt_url "$backend_host")"
 storybook_url="$(fmt_url "$storybook_host")"
+ds_storybook_url="$(fmt_url "$ds_storybook_host")"
+consumer_frontend_url="$(fmt_url "$consumer_frontend_host")"
+consumer_backend_url="$(fmt_url "$consumer_backend_host")"
 
 printf 'Worktree: %s\n' "$wt_name"
 printf 'Root:     %s\n' "$wt_root"
@@ -175,15 +183,101 @@ if [[ -n "$wt_branch" ]]; then
 fi
 printf 'Preset:   %s\n' "$wt_project_config"
 printf 'Routes:\n'
-printf '  frontend  %s\n' "$frontend_url"
-if [[ "$wt_project_config" == "fullstack" ]]; then
-  printf '  backend   %s\n' "$backend_url"
-  printf '  storybook %s\n' "$storybook_url"
+if [[ "${WTUP_WORKFLOW:-auto}" == "component-only" ]]; then
+  printf '  ds-storybook %s\n' "$ds_storybook_url"
+elif [[ "${WTUP_WORKFLOW:-auto}" == "consumer-context" ]]; then
+  printf '  ds-storybook %s\n' "$ds_storybook_url"
+  printf '  consumer-app %s\n' "$consumer_frontend_url"
+  if [[ "${AURORA_CONSUMER_KIND:-}" == "dse" || "${AURORA_CONSUMER_KIND:-}" == "fullstack" ]]; then
+    printf '  consumer-api %s\n' "$consumer_backend_url"
+  fi
+else
+  printf '  frontend  %s\n' "$frontend_url"
+  if [[ "$wt_project_config" == "fullstack" ]]; then
+    printf '  backend   %s\n' "$backend_url"
+    printf '  storybook %s\n' "$storybook_url"
+  fi
+fi
+
+if [[ "${WTUP_WORKFLOW:-auto}" == "component-only" || "${WTUP_WORKFLOW:-auto}" == "consumer-context" ]]; then
+  printf '\nDesign system:\n'
+  printf '  root      %s\n' "${AURORA_UI_WORKTREE:-${AURORA_DS_WORKTREE:-}}"
+  printf '  channel   %s\n' "${AURORA_DS_CHANNEL:-alpha}"
+  printf '  link mode %s\n' "${AURORA_DS_LINK_MODE:-source}"
+  printf '  source    %s\n' "${AURORA_DS_COMPONENTS_SOURCE:-}"
+  printf '  package   %s\n' "${AURORA_DS_COMPONENTS_PACKAGE:-}"
+  printf '  storybook %s\n' "${AURORA_DS_STORYBOOK_STATIC:-}"
+  printf '  snapshot  %s\n' "${AURORA_DS_SNAPSHOT:-}"
+
+  if [[ -f "${AURORA_DS_SNAPSHOT:-}" ]] && command -v python3 >/dev/null 2>&1; then
+    snapshot_id="$(python3 - "${AURORA_DS_SNAPSHOT:-}" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+
+for key in ("designSystemSnapshotId", "snapshotId", "id"):
+    value = data.get(key)
+    if value:
+        print(value)
+        break
+PY
+)"
+    if [[ -n "${snapshot_id:-}" ]]; then
+      printf '  snapshot id %s\n' "$snapshot_id"
+    fi
+
+    package_snapshot_metadata="${AURORA_DS_COMPONENTS_PACKAGE:-}/design-system-snapshot.json"
+    if [[ -f "$package_snapshot_metadata" ]]; then
+      package_snapshot_info="$(python3 - "$package_snapshot_metadata" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+
+snapshot_id = data.get("designSystemSnapshotId") or data.get("snapshotId") or data.get("id")
+channel = data.get("designSystemChannel")
+
+if snapshot_id:
+    print(f"{snapshot_id}\t{channel or ''}")
+PY
+)"
+      package_snapshot_id="${package_snapshot_info%%$'\t'*}"
+      package_snapshot_channel="${package_snapshot_info#*$'\t'}"
+      if [[ -n "${package_snapshot_id:-}" ]] && [[ "$package_snapshot_id" != "$package_snapshot_info" ]]; then
+        if [[ "${package_snapshot_id:-}" != "${snapshot_id:-}" ]]; then
+          printf '  package snapshot id %s\n' "$package_snapshot_id"
+          printf '  snapshot warning package/static metadata differ\n'
+        fi
+        if [[ -n "${AURORA_DS_CHANNEL:-}" && -n "${package_snapshot_channel:-}" && "$package_snapshot_channel" != "${AURORA_DS_CHANNEL:-}" ]]; then
+          printf '  snapshot warning package channel is %s\n' "$package_snapshot_channel"
+        fi
+      fi
+    fi
+  fi
+fi
+
+if [[ "${WTUP_WORKFLOW:-auto}" == "consumer-context" ]]; then
+  printf '\nConsumer:\n'
+  printf '  root      %s\n' "${AURORA_CONSUMER_WORKTREE:-}"
+  printf '  kind      %s\n' "${AURORA_CONSUMER_KIND:-unknown}"
 fi
 
 if command -v portless >/dev/null 2>&1; then
   routes="$(NO_COLOR=1 portless list 2>/dev/null || true)"
-  if [[ "$wt_project_config" == "fullstack" ]]; then
+  if [[ "${WTUP_WORKFLOW:-auto}" == "component-only" ]]; then
+    active_lines="$(printf '%s\n' "$routes" | awk -v u1="$ds_storybook_url" 'index($0,u1) {print}')"
+  elif [[ "${WTUP_WORKFLOW:-auto}" == "consumer-context" ]]; then
+    active_lines="$(printf '%s\n' "$routes" | awk -v u1="$ds_storybook_url" -v u2="$consumer_frontend_url" -v u3="$consumer_backend_url" 'index($0,u1) || index($0,u2) || index($0,u3) {print}')"
+  elif [[ "$wt_project_config" == "fullstack" ]]; then
     active_lines="$(printf '%s\n' "$routes" | awk -v u1="$frontend_url" -v u2="$backend_url" -v u3="$storybook_url" 'index($0,u1) || index($0,u2) || index($0,u3) {print}')"
   else
     active_lines="$(printf '%s\n' "$routes" | awk -v u1="$frontend_url" 'index($0,u1) {print}')"

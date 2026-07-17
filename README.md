@@ -18,7 +18,12 @@
 - Creates new branches from the current checkout/worktree `HEAD` by default; use `-m` to base on latest main instead.
 - Auto-detects `forged-realms` worktrees as the `frontend` preset and leaves everything else on the default fullstack preset.
 - Supports a `frontend` preset for standard React/frontend projects with one app pane and utility shells.
-- Spawns `omp` and `codex` by default in the Windows Terminal tools window, configurable through `WTUP_WT_COMMANDS`.
+- Adds explicit DS workflows without changing the default `wtup <target>` behavior:
+  - `component-only` for `aurora-ui/packages/components-v2` plus `storybook-v2`.
+  - `consumer-context` for validating aurora-ui DS work inside any consumer repo.
+- When launched inside WezTerm, keeps the workspace and tools in one WezTerm window: the current tab becomes the Zellij workspace and the tools open in a sibling tab.
+- Outside WezTerm, spawns `omp` and `codex` by default in the Windows Terminal tools window when available.
+- Tool commands are configurable through `WTUP_TOOL_COMMANDS` or the backward-compatible `WTUP_WT_COMMANDS`.
 
 ## Usage
 
@@ -41,9 +46,183 @@ wtup .
 # Force the frontend workspace preset
 WTUP_PROJECT_CONFIG=frontend wtup feat/ui-refresh
 
-# Change the tools opened in the Windows Terminal helper window
-WTUP_WT_COMMANDS=claude,codex wtup .
+# Launch aurora-ui Storybook v2 plus a components-v2 package shell
+wtup --component-only feat/components-refresh
+
+# Launch aurora-ui Storybook v2 beside a consumer app
+wtup --workflow consumer-context --ds feat/components-refresh --consumer ../consumer-app
+
+# DSE-friendly consumer alias
+wtup --product-context --ds feat/components-refresh --dse ../design_system_evolution
+
+# Change the tools opened in the helper tools context
+WTUP_TOOL_COMMANDS=claude,codex wtup .
 ```
+
+## Design System Workflows
+
+The default `auto` workflow is unchanged and remains what you get from `wtup <target>`.
+
+Use `component-only` for DS-only work in `aurora-ui`:
+
+```bash
+wtup --workflow component-only <aurora-target>
+wtup --component-only <aurora-target>
+```
+
+It launches:
+
+- aurora-ui Storybook v2 from `storybook-v2`.
+- A shell rooted at `packages/components-v2`.
+- A summary pane with DS paths, routes, and snapshot metadata when present.
+
+Use `consumer-context` when validating shared DS work inside a product app. It requires one aurora-ui target and one consumer target:
+
+```bash
+wtup --workflow consumer-context --ds <aurora-target> --consumer <repo-target>
+wtup --product-context --ds <aurora-target> --consumer <repo-target>
+wtup --product-context --ds <aurora-target> --dse <repo-target>
+```
+
+It launches aurora-ui Storybook v2, the consumer app, an optional consumer
+backend when detected, and a summary pane. It does not launch the consumer
+Storybook; aurora-ui Storybook is the canonical DS reference for this workflow.
+
+Consumer panes receive:
+
+```bash
+AURORA_UI_WORKTREE=<aurora-ui-worktree>
+AURORA_DS_CHANNEL=<stable|alpha>
+AURORA_DS_LINK_MODE=<source|snapshot>
+AURORA_DS_COMPONENTS_SOURCE=<aurora-ui-worktree>/packages/components-v2/src
+AURORA_DS_COMPONENTS_PACKAGE=<aurora-ui-worktree>/packages/components-v2/dist/<channel>-package
+AURORA_DS_STORYBOOK_STATIC=<aurora-ui-worktree>/storybook-v2/storybook-static
+AURORA_DS_SNAPSHOT=<aurora-ui-worktree>/storybook-v2/storybook-static/design-system-snapshot.json
+```
+
+### Source-link mode
+
+`consumer-context` defaults to `--ds-channel alpha --ds-link source`:
+
+```bash
+wtup --workflow consumer-context --ds <aurora-target> --consumer <repo-target>
+```
+
+Use this while editing `aurora-ui/packages/components-v2/src`. The consumer app
+should keep normal imports:
+
+```tsx
+import { Button } from '@aurora-ui/components-v2';
+```
+
+The consumer repo should resolve that package to
+`AURORA_DS_COMPONENTS_SOURCE`. For Vite consumers, use env-driven aliases like:
+
+```ts
+// vite.config.ts
+import path from 'node:path';
+import { defineConfig } from 'vite';
+
+const dsSource = process.env.AURORA_DS_COMPONENTS_SOURCE;
+
+export default defineConfig({
+  resolve: {
+    alias: dsSource
+      ? [
+          {
+            find: /^@aurora-ui\/components-v2\/style\.css$/,
+            replacement: path.join(dsSource, 'styles.css'),
+          },
+          {
+            find: /^@aurora-ui\/components-v2$/,
+            replacement: path.join(dsSource, 'index.ts'),
+          },
+        ]
+      : [],
+  },
+  server: {
+    fs: {
+      allow: dsSource ? [path.resolve(dsSource, '../../..')] : undefined,
+    },
+  },
+  optimizeDeps: {
+    exclude: dsSource ? ['@aurora-ui/components-v2'] : [],
+  },
+});
+```
+
+In this mode, aurora-ui Storybook and the consumer app read from the same live
+source tree.
+
+### Snapshot/package mode
+
+Build a paired DS package and static Storybook snapshot in aurora-ui before
+launching package mode:
+
+```bash
+yarn design-system:snapshot:alpha
+wtup --workflow consumer-context \
+  --ds <aurora-target> \
+  --consumer <repo-target> \
+  --ds-link snapshot \
+  --ds-channel alpha \
+  --strict-workflow
+```
+
+Use `stable` for the stable channel:
+
+```bash
+yarn design-system:snapshot:stable
+wtup --workflow consumer-context \
+  --ds <aurora-target> \
+  --consumer <repo-target> \
+  --ds-link snapshot \
+  --ds-channel stable \
+  --strict-workflow
+```
+
+The consumer repo should resolve `@aurora-ui/components-v2` to
+`AURORA_DS_COMPONENTS_PACKAGE`, which points at
+`packages/components-v2/dist/<channel>-package`. For Vite consumers:
+
+```ts
+// vite.config.ts
+import path from 'node:path';
+import { defineConfig } from 'vite';
+
+const dsPackage = process.env.AURORA_DS_COMPONENTS_PACKAGE;
+
+export default defineConfig({
+  resolve: {
+    alias: dsPackage
+      ? [
+          {
+            find: /^@aurora-ui\/components-v2$/,
+            replacement: dsPackage,
+          },
+        ]
+      : [],
+  },
+  server: {
+    fs: {
+      allow: dsPackage ? [path.resolve(dsPackage, '../../..')] : undefined,
+    },
+  },
+});
+```
+
+The package artifact exports `@aurora-ui/components-v2`,
+`@aurora-ui/components-v2/components`, `@aurora-ui/components-v2/charts`,
+`@aurora-ui/components-v2/style.css`, and
+`@aurora-ui/components-v2/design-system-snapshot.json`.
+
+Snapshot mode requires the package metadata and
+`storybook-v2/storybook-static/design-system-snapshot.json` to share the same
+`designSystemSnapshotId` and channel. If they do not match, rerun the snapshot
+script for the requested channel and relaunch wtup. In non-strict mode wtup
+warns; with `--strict-workflow` or `--no-prompt`, it fails.
+
+Use `--no-prompt` for headless runs and `--strict-workflow` to fail when repo/link support or snapshot artifacts are missing instead of warning.
 
 ## How Branch Base Is Chosen
 
@@ -60,8 +239,12 @@ WTUP_WT_COMMANDS=claude,codex wtup .
 - `WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*'` adds frontend auto-detection rules.
 - `WTUP_FULLSTACK_PROJECT_PATTERNS='*design_system_evolution*'` forces the fullstack preset before frontend matching.
 - `WTUP_FRONTEND_RUN_COMMAND="npm run dev"` overrides the app pane command for the frontend preset.
-- `WTUP_WT_COMMANDS=claude,codex` replaces `omp` with `claude` in the tools window.
-- `WTUP_WT_COMMANDS=omp,claude,codex` opens all three tools.
+- `WTUP_TERMINAL_BACKEND=wezterm` forces the WezTerm tools-tab backend. `auto` is the default.
+- `WTUP_TERMINAL_BACKEND=windows-terminal` forces the Windows Terminal tools-window backend.
+- `WTUP_TERMINAL_BACKEND=none` disables the helper tools context.
+- `WTUP_TOOL_COMMANDS=claude,codex` replaces `omp` with `claude` in the tools context.
+- `WTUP_TOOL_COMMANDS=omp,claude,codex` opens all three tools.
+- `WTUP_WT_COMMANDS=claude,codex` remains supported as an alias for older shell configuration.
 
 ## Install locally
 
