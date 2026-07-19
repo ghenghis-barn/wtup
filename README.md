@@ -59,9 +59,15 @@ wtup --product-context --ds feat/components-refresh --dse ../design_system_evolu
 WTUP_TOOL_COMMANDS=claude,codex wtup .
 ```
 
-## Design System Workflows
+## Design System Contribution Workflows
 
 The default `auto` workflow is unchanged and remains what you get from `wtup <target>`.
+
+Most product development should consume `@aurora-ui/components-v2` through the
+normal monorepo workspace package or the versioned private npm package from
+CodeArtifact. The workflows below are for local DS development, DS contribution
+review, cross-repo validation, and evaluation runs where a product surface must
+be launched beside a local aurora-ui DS source tree or generated snapshot.
 
 Use `component-only` for DS-only work in `aurora-ui`:
 
@@ -76,7 +82,8 @@ It launches:
 - A shell rooted at `packages/components-v2`.
 - A summary pane with DS paths, routes, and snapshot metadata when present.
 
-Use `consumer-context` when validating shared DS work inside a product app. It requires one aurora-ui target and one consumer target:
+Use `consumer-context` when validating shared DS changes inside a product app.
+It requires one aurora-ui target and one consumer target:
 
 ```bash
 wtup --workflow consumer-context --ds <aurora-target> --consumer <repo-target>
@@ -108,8 +115,9 @@ AURORA_DS_SNAPSHOT=<aurora-ui-worktree>/storybook-v2/storybook-static/design-sys
 wtup --workflow consumer-context --ds <aurora-target> --consumer <repo-target>
 ```
 
-Use this while editing `aurora-ui/packages/components-v2/src`. The consumer app
-should keep normal imports:
+Use this while editing `aurora-ui/packages/components-v2/src` and checking the
+change inside a product surface before publishing. The consumer app should keep
+normal imports:
 
 ```tsx
 import { Button } from '@aurora-ui/components-v2';
@@ -153,6 +161,9 @@ export default defineConfig({
 
 In this mode, aurora-ui Storybook and the consumer app read from the same live
 source tree.
+
+Do not use source-link mode for ordinary product feature work. Use the workspace
+dependency or published private npm package instead.
 
 ### Snapshot/package mode
 
@@ -215,6 +226,10 @@ The package artifact exports `@aurora-ui/components-v2`,
 `@aurora-ui/components-v2/components`, `@aurora-ui/components-v2/charts`,
 `@aurora-ui/components-v2/style.css`, and
 `@aurora-ui/components-v2/design-system-snapshot.json`.
+
+This is a local/evaluation artifact path, not the primary distribution channel.
+Production and normal product development should consume the versioned package
+from the private npm registry / CodeArtifact.
 
 Snapshot mode requires the package metadata and
 `storybook-v2/storybook-static/design-system-snapshot.json` to share the same
