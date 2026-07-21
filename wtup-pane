@@ -204,7 +204,7 @@ case "$role" in
       exit 1
     fi
 
-    exec portless "storybook.${ds_host}" bash -lc 'exec yarn workspace @aurora-ui/storybook-v2 run storybook -- -p "$PORT" --host "$HOST"'
+    exec portless "storybook.${ds_host}" bash -lc 'exec yarn workspace @aurora-ui/storybook-v2 exec storybook dev -p "$PORT" --host "$HOST"'
     ;;
   ds-components)
     if [[ -n "${AURORA_UI_WORKTREE:-}" && -d "${AURORA_UI_WORKTREE:-}" ]]; then
