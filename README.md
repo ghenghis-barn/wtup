@@ -21,6 +21,8 @@
 - Adds explicit DS workflows without changing the default `wtup <target>` behavior:
   - `component-only` for `aurora-ui/packages/components-v2` plus `storybook-v2`.
   - `consumer-context` for validating aurora-ui DS work inside any consumer repo.
+- When launched from a Herdr-managed pane, creates or opens a native Herdr
+  worktree workspace and expresses the selected preset as Herdr tabs and panes.
 - When launched inside WezTerm, keeps the workspace and tools in one WezTerm window: the current tab becomes the Zellij workspace and the tools open in a sibling tab.
 - Outside WezTerm, spawns `omp` and `codex` by default in the Windows Terminal tools window when available.
 - Tool commands are configurable through `WTUP_TOOL_COMMANDS` or the backward-compatible `WTUP_WT_COMMANDS`.
@@ -58,6 +60,36 @@ wtup --product-context --ds feat/components-refresh --dse ../design_system_evolu
 # Change the tools opened in the helper tools context
 WTUP_TOOL_COMMANDS=claude,codex wtup .
 ```
+
+## Herdr-native workspaces
+
+`WTUP_WORKSPACE_BACKEND=auto` is the default. When `wtup` is invoked from a
+Herdr pane running protocol 17 or newer, the target worktree is created or
+opened through the Herdr worktree API. `wtup` then builds the workspace directly
+from Herdr tabs and panes; it does not start Zellij or create WezTerm/Windows
+Terminal windows.
+
+The native presets retain the existing process roles:
+
+- `fullstack`: `Overview`, `Services`, `Nvim`, and `Agents` tabs.
+- `frontend`: `Dev`, `Nvim`, and `Agents` tabs. The app pane continues to use
+  the existing package-manager/Astro-compatible dev-command detection.
+- `component-only`: `Design System`, `Nvim`, and `Agents` tabs.
+- `consumer-context`: `Overview`, `Apps`, `Nvim`, and `Agents` tabs.
+
+Configured commands from `WTUP_TOOL_COMMANDS` run in the `Agents` tab. Canonical
+Herdr-supported agents are started through `herdr agent start`, while arbitrary
+commands use a normal Herdr pane. Set `WTUP_TERMINAL_BACKEND=none` to omit the
+tab.
+
+Use `WTUP_WORKSPACE_BACKEND=zellij` to force the legacy multiplexer path.
+`WTUP_ZELLIJ_LAYOUT` is intentionally rejected by the Herdr backend because
+arbitrary KDL cannot be translated reliably to Herdr's pane tree.
+
+Re-running `wtup` for an already-open Herdr worktree focuses its workspace
+without duplicating tabs or processes. `--reset` closes and rebuilds an open
+target workspace, but must be invoked from a different Herdr workspace so the
+command cannot terminate its own pane.
 
 ## Design System Contribution Workflows
 
@@ -250,11 +282,18 @@ Use `--no-prompt` for headless runs and `--strict-workflow` to fail when repo/li
 ## Useful environment variables
 
 - `WTUP_BASE_REF=feat/my-feature` creates new branches from an explicit ref instead of the current `HEAD`.
+- `WTUP_WORKTREE_HOST=my-feature` explicitly overrides the target's
+  Portless/session host, including when called from another managed workspace.
 - `WTUP_PROJECT_CONFIG=frontend` forces the frontend-only layout instead of auto-detection.
+- `WTUP_WORKSPACE_BACKEND=herdr` requires native Herdr composition.
+- `WTUP_WORKSPACE_BACKEND=zellij` forces the legacy Zellij composition.
 - `WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*'` adds frontend auto-detection rules.
 - `WTUP_FULLSTACK_PROJECT_PATTERNS='*design_system_evolution*'` forces the fullstack preset before frontend matching.
 - `WTUP_FRONTEND_RUN_COMMAND="npm run dev"` overrides the app pane command for the frontend preset.
-- `WTUP_TERMINAL_BACKEND=wezterm` forces the WezTerm tools-tab backend. `auto` is the default.
+- `WTUP_TERMINAL_BACKEND=herdr` uses the native Herdr `Agents` tab when the
+  workspace backend is Herdr. `auto` is the default.
+- `WTUP_TERMINAL_BACKEND=wezterm` forces the WezTerm tools-tab backend on the
+  Zellij workspace path.
 - `WTUP_TERMINAL_BACKEND=windows-terminal` forces the Windows Terminal tools-window backend.
 - `WTUP_TERMINAL_BACKEND=none` disables the helper tools context.
 - `WTUP_TOOL_COMMANDS=claude,codex` replaces `omp` with `claude` in the tools context.

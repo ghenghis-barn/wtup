@@ -51,6 +51,7 @@ done
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 files=(
   wtup
+  wtup-herdr
   wtup-pane
   wtup-summary
   wtup-utility

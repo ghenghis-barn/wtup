@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_id="${WTUP_HERDR_WORKSPACE_ID:?WTUP_HERDR_WORKSPACE_ID is required}"
+main_tab_id="${WTUP_HERDR_TAB_ID:?WTUP_HERDR_TAB_ID is required}"
+root_pane_id="${WTUP_HERDR_ROOT_PANE_ID:?WTUP_HERDR_ROOT_PANE_ID is required}"
+workflow="${WTUP_WORKFLOW:-auto}"
+project_config="${WTUP_PROJECT_CONFIG:-fullstack}"
+wt_root="${WTUP_ROOT:?WTUP_ROOT is required}"
+consumer_root="${AURORA_CONSUMER_WORKTREE:-$wt_root}"
+
+trap 'echo "wtup-herdr: layout creation failed; the Herdr workspace and worktree were retained" >&2' ERR
+
+json_value() {
+  local json="$1"
+  local path="$2"
+
+  python3 - "$json" "$path" <<'PY'
+import json
+import sys
+
+value = json.loads(sys.argv[1])
+for part in sys.argv[2].split("."):
+    value = value[part]
+print(value)
+PY
+}
+
+env_args=()
+run_env=()
+for name in \
+  WORKTREE_NAME WORKTREE_HOST WTUP_PROJECT_CONFIG WTUP_WORKFLOW WTUP_MANAGED_ENV \
+  WTUP_FRONTEND_RUN_COMMAND WTUP_DS_COMPONENTS_COMMAND \
+  PORTLESS_PORT PORTLESS_HTTPS \
+  AURORA_UI_WORKTREE AURORA_DS_WORKTREE AURORA_DS_WORKTREE_HOST \
+  AURORA_DS_CHANNEL AURORA_DS_LINK_MODE AURORA_DS_COMPONENTS_SOURCE \
+  AURORA_DS_COMPONENTS_PACKAGE AURORA_DS_STORYBOOK_STATIC AURORA_DS_SNAPSHOT \
+  AURORA_CONSUMER_WORKTREE AURORA_CONSUMER_WORKTREE_HOST AURORA_CONSUMER_KIND; do
+  if [[ -v "$name" ]]; then
+    env_args+=(--env "${name}=${!name}")
+    run_env+=("${name}=${!name}")
+  fi
+done
+
+rename_tab() {
+  herdr tab rename "$1" "$2" >/dev/null
+}
+
+rename_pane() {
+  herdr pane rename "$1" "$2" >/dev/null
+}
+
+run_pane() {
+  local pane_id="$1"
+  local label="$2"
+  shift 2
+
+  rename_pane "$pane_id" "$label"
+  herdr pane run "$pane_id" env "${run_env[@]}" "$@" >/dev/null
+}
+
+create_tab() {
+  local label="$1"
+  local cwd="$2"
+  local response=""
+
+  response="$(herdr tab create \
+    --workspace "$workspace_id" \
+    --cwd "$cwd" \
+    --label "$label" \
+    "${env_args[@]}" \
+    --no-focus)"
+  printf '%s\t%s\n' \
+    "$(json_value "$response" "result.tab.tab_id")" \
+    "$(json_value "$response" "result.root_pane.pane_id")"
+}
+
+split_pane() {
+  local source_pane="$1"
+  local direction="$2"
+  local ratio="$3"
+  local cwd="$4"
+  local response=""
+
+  response="$(herdr pane split "$source_pane" \
+    --direction "$direction" \
+    --ratio "$ratio" \
+    --cwd "$cwd" \
+    "${env_args[@]}" \
+    --no-focus)"
+  json_value "$response" "result.pane.pane_id"
+}
+
+create_nvim_tab() {
+  local fields=""
+  local tab_id=""
+  local pane_id=""
+
+  fields="$(create_tab "Nvim" "$wt_root")"
+  IFS=$'\t' read -r tab_id pane_id <<<"$fields"
+  run_pane "$pane_id" "Nvim" nvim
+}
+
+start_tool() {
+  local pane_id="$1"
+  local command="$2"
+  local kind="${command%% *}"
+  local label="$kind"
+
+  [[ -n "$label" ]] || label="tool"
+  rename_pane "$pane_id" "$label"
+
+  case "$command" in
+    pi|claude|codex|gemini|cursor|devin|agy|cline|omp|mastracode|opencode|copilot|kimi|kiro|droid|amp|grok|hermes|kilo|qodercli|maki)
+      herdr agent start "$label" --kind "$kind" --pane "$pane_id" >/dev/null
+      ;;
+    *)
+      herdr pane run "$pane_id" bash -ic "exec ${command}" >/dev/null
+      ;;
+  esac
+}
+
+create_agents_tab() {
+  local configured="${WTUP_TOOL_COMMANDS:-${WTUP_WT_COMMANDS:-omp,codex}}"
+  local tokens=()
+  local commands=()
+  local token=""
+  local fields=""
+  local tab_id=""
+  local pane_id=""
+  local next_pane=""
+  local i=0
+
+  case "${WTUP_TERMINAL_BACKEND:-auto}" in
+    none|off|0|false)
+      return
+      ;;
+  esac
+
+  IFS=',' read -r -a tokens <<<"$configured"
+  for token in "${tokens[@]}"; do
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    [[ -n "$token" ]] && commands+=("$token")
+  done
+  (( ${#commands[@]} > 0 )) || return
+
+  fields="$(create_tab "Agents" "$wt_root")"
+  IFS=$'\t' read -r tab_id pane_id <<<"$fields"
+  start_tool "$pane_id" "${commands[0]}"
+
+  for (( i=1; i<${#commands[@]}; i++ )); do
+    next_pane="$(split_pane "$pane_id" "right" "0.5" "$wt_root")"
+    start_tool "$next_pane" "${commands[i]}"
+  done
+}
+
+build_fullstack() {
+  local utility_pane=""
+  local fields=""
+  local services_tab=""
+  local frontend_pane=""
+  local backend_pane=""
+  local storybook_pane=""
+
+  rename_tab "$main_tab_id" "Overview"
+  utility_pane="$(split_pane "$root_pane_id" "right" "0.5" "$wt_root")"
+  run_pane "$root_pane_id" "Workspace Summary" wtup-utility
+  rename_pane "$utility_pane" "Utility Bash"
+
+  fields="$(create_tab "Services" "$wt_root")"
+  IFS=$'\t' read -r services_tab frontend_pane <<<"$fields"
+  backend_pane="$(split_pane "$frontend_pane" "right" "0.5" "$wt_root/services/flexplorer-api/backend")"
+  storybook_pane="$(split_pane "$backend_pane" "down" "0.5" "$wt_root")"
+  run_pane "$frontend_pane" "Frontend" wtup-pane frontend
+  run_pane "$backend_pane" "Backend" wtup-pane backend
+  run_pane "$storybook_pane" "Storybook" wtup-pane storybook
+}
+
+build_frontend() {
+  local app_pane=""
+  local utility_pane=""
+  local scratch_pane=""
+
+  rename_tab "$main_tab_id" "Dev"
+  app_pane="$(split_pane "$root_pane_id" "right" "0.62" "$wt_root")"
+  utility_pane="$(split_pane "$app_pane" "down" "0.52" "$wt_root")"
+  scratch_pane="$(split_pane "$utility_pane" "down" "0.5" "$wt_root")"
+  run_pane "$root_pane_id" "Workspace Summary" wtup-utility
+  run_pane "$app_pane" "App" wtup-pane app
+  rename_pane "$utility_pane" "Utility Bash"
+  rename_pane "$scratch_pane" "Scratch Bash"
+}
+
+build_component_only() {
+  local storybook_pane=""
+  local components_pane=""
+
+  rename_tab "$main_tab_id" "Design System"
+  storybook_pane="$(split_pane "$root_pane_id" "right" "0.64" "$wt_root")"
+  components_pane="$(split_pane "$storybook_pane" "down" "0.42" "$wt_root/packages/components-v2")"
+  run_pane "$root_pane_id" "DS Summary" wtup-utility
+  run_pane "$storybook_pane" "Storybook v2" wtup-pane ds-storybook
+  run_pane "$components_pane" "components-v2" wtup-pane ds-components
+}
+
+build_consumer_context() {
+  local utility_pane=""
+  local fields=""
+  local apps_tab=""
+  local storybook_pane=""
+  local app_pane=""
+  local backend_pane=""
+
+  rename_tab "$main_tab_id" "Overview"
+  utility_pane="$(split_pane "$root_pane_id" "right" "0.5" "$consumer_root")"
+  run_pane "$root_pane_id" "DS Consumer Summary" wtup-utility
+  rename_pane "$utility_pane" "Utility Bash"
+
+  fields="$(create_tab "Apps" "$wt_root")"
+  IFS=$'\t' read -r apps_tab storybook_pane <<<"$fields"
+  app_pane="$(split_pane "$storybook_pane" "right" "0.6" "$consumer_root")"
+  run_pane "$storybook_pane" "DS Storybook v2" wtup-pane ds-storybook
+  run_pane "$app_pane" "Consumer App" wtup-pane consumer-app
+  if [[ "${WTUP_CONSUMER_HAS_BACKEND:-0}" == "1" ]]; then
+    backend_pane="$(split_pane "$app_pane" "down" "0.5" "$consumer_root")"
+    run_pane "$backend_pane" "Consumer Backend" wtup-pane consumer-backend
+  fi
+}
+
+case "$workflow" in
+  component-only)
+    build_component_only
+    ;;
+  consumer-context)
+    build_consumer_context
+    ;;
+  auto)
+    case "$project_config" in
+      frontend) build_frontend ;;
+      fullstack) build_fullstack ;;
+      *)
+        echo "wtup-herdr: unknown project config: $project_config" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "wtup-herdr: unknown workflow: $workflow" >&2
+    exit 2
+    ;;
+esac
+
+create_nvim_tab
+create_agents_tab
+herdr workspace report-metadata "$workspace_id" \
+  --source wtup \
+  --token "wtup_layout=${workflow}:${project_config}:1" >/dev/null
+herdr tab focus "$main_tab_id" >/dev/null
+herdr workspace focus "$workspace_id" >/dev/null

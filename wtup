@@ -12,6 +12,12 @@ ds_link="source"
 consumer_kind="auto"
 no_prompt=0
 strict_workflow=0
+workspace_backend_request="${WTUP_WORKSPACE_BACKEND:-auto}"
+workspace_backend=""
+herdr_workspace_id=""
+herdr_tab_id=""
+herdr_root_pane_id=""
+herdr_already_open=0
 
 print_help() {
   cat <<'EOF' >&2
@@ -94,6 +100,10 @@ OPTIONS
     Fail instead of warning/falling back when requested workflow support is
     missing.
 
+  --workspace-backend <auto|herdr|zellij>
+    Select the workspace multiplexer. auto uses Herdr when invoked from a
+    Herdr-managed pane and otherwise preserves the Zellij behavior.
+
   --help, -h, -help
     Show this help.
 
@@ -129,6 +139,8 @@ BEHAVIOR
       layouts/commands).
 
   - Tools terminal
+    With the Herdr workspace backend, configured tools open in an Agents tab
+    inside the target workspace. No outer terminal window is created.
     If wtup is run inside WezTerm (WEZTERM_PANE is set), the current tab becomes
     the Zellij workspace and wtup opens the configured tools in a sibling
     WezTerm tab rooted at the same worktree. Multiple tools are split inside
@@ -153,6 +165,9 @@ ENVIRONMENT VARIABLES
                          Default: main
 
   Workspace preset
+    WTUP_WORKTREE_HOST   Explicit Portless/session host override. Unlike the
+                         pane-level WORKTREE_HOST, this applies when launching
+                         another worktree from a wtup-managed workspace.
     WTUP_PROJECT_CONFIG  Explicit workspace preset override. Values: fullstack, frontend
                          - fullstack: frontend + backend + storybook panes
                          - frontend: single app pane + utility bash panes
@@ -176,12 +191,19 @@ ENVIRONMENT VARIABLES
                          If unset, wtup picks a preset-specific default layout.
                          The frontend preset falls back to a built-in layout.
 
+  Workspace backend
+    WTUP_WORKSPACE_BACKEND
+                         Values: auto, herdr, zellij. In Herdr mode, wtup
+                         creates native workspaces, tabs, and panes instead of
+                         nesting Zellij or spawning outer terminal windows.
+
   Tools terminal
     WTUP_TERMINAL_BACKEND
-                         Tool terminal backend. Values: auto, wezterm,
+                         Tool terminal backend. Values: auto, herdr, wezterm,
                          windows-terminal, none.
-                         Default: auto (wezterm inside WezTerm, otherwise
-                         Windows Terminal when available)
+                         In Herdr workspaces, auto means herdr. On the Zellij
+                         path, auto means WezTerm inside WezTerm and otherwise
+                         Windows Terminal when available.
     WTUP_TOOL_COMMANDS   Comma-separated commands to open in the tools context.
                          Default: WTUP_WT_COMMANDS or omp,codex.
 
@@ -366,6 +388,18 @@ while [[ $# -gt 0 ]]; do
       strict_workflow=1
       shift
       ;;
+    --workspace-backend)
+      if [[ $# -lt 2 ]]; then
+        echo "wtup: --workspace-backend requires a value" >&2
+        exit 2
+      fi
+      workspace_backend_request="$2"
+      shift 2
+      ;;
+    --workspace-backend=*)
+      workspace_backend_request="${1#*=}"
+      shift
+      ;;
     --help|-h)
       print_help
       exit 0
@@ -429,6 +463,15 @@ case "$consumer_kind" in
     ;;
   *)
     echo "wtup: unknown --consumer-kind: $consumer_kind (expected: auto, dse, frontend, fullstack)" >&2
+    exit 2
+    ;;
+esac
+
+case "$workspace_backend_request" in
+  auto|herdr|zellij)
+    ;;
+  *)
+    echo "wtup: unknown workspace backend: $workspace_backend_request (expected: auto, herdr, zellij)" >&2
     exit 2
     ;;
 esac
@@ -745,6 +788,7 @@ repo_hint_for_ds() {
 resolve_worktree_target() {
   local target="$1"
   local repo_hint="${2:-}"
+  local creation_backend="${3:-git}"
   local resolved_root=""
   local resolved_name=""
   local resolved_dir_name=""
@@ -764,6 +808,8 @@ resolve_worktree_target() {
   local right_count=""
   local base_sha=""
   local main_sha=""
+  local herdr_json=""
+  local herdr_fields=""
 
   if [[ -z "$target" ]]; then
     echo "wtup: internal error: resolve_worktree_target called without a target" >&2
@@ -885,7 +931,22 @@ resolve_worktree_target() {
         return 1
       fi
 
-      if git -C "$git_root" show-ref --verify --quiet "refs/heads/${resolved_name}"; then
+      if [[ "$creation_backend" == "herdr" ]]; then
+        if ! herdr_json="$(herdr worktree create \
+          --cwd "$git_root" \
+          --branch "$resolved_name" \
+          --base "$base_ref" \
+          --path "$resolved_root" \
+          --label "$resolved_name" \
+          --no-focus \
+          --json)"; then
+          echo "wtup: Herdr failed to create worktree '$resolved_name'" >&2
+          return 1
+        fi
+        herdr_fields="$(parse_herdr_worktree_result "$herdr_json")" || return 1
+        printf '%s\t%s\t%s\n' "$resolved_root" "$resolved_name" "$herdr_fields"
+        return
+      elif git -C "$git_root" show-ref --verify --quiet "refs/heads/${resolved_name}"; then
         git -C "$git_root" worktree add "$resolved_root" "$resolved_name" >&2
       else
         git -C "$git_root" worktree add -b "$resolved_name" "$resolved_root" "$base_ref" >&2
@@ -893,7 +954,49 @@ resolve_worktree_target() {
     fi
   fi
 
+  if [[ "$creation_backend" == "herdr" ]]; then
+    if ! herdr_json="$(herdr worktree open \
+      --cwd "$resolved_root" \
+      --path "$resolved_root" \
+      --label "$resolved_name" \
+      --no-focus \
+      --json)"; then
+      echo "wtup: Herdr failed to open worktree '$resolved_root'" >&2
+      return 1
+    fi
+    herdr_fields="$(parse_herdr_worktree_result "$herdr_json")" || return 1
+    printf '%s\t%s\t%s\n' "$resolved_root" "$resolved_name" "$herdr_fields"
+    return
+  fi
+
   printf '%s\t%s\n' "$resolved_root" "$resolved_name"
+}
+
+parse_herdr_worktree_result() {
+  local json="$1"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "wtup: Herdr mode requires python3 for structured API responses" >&2
+    return 1
+  }
+
+  python3 - "$json" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+    result = payload["result"]
+    workspace_id = result["workspace"]["workspace_id"]
+    tab_id = result["tab"]["tab_id"]
+    pane_id = result["root_pane"]["pane_id"]
+    already_open = 1 if result.get("already_open", False) else 0
+except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    print(f"wtup: invalid Herdr worktree response: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{workspace_id}\t{tab_id}\t{pane_id}\t{already_open}")
+PY
 }
 
 escape_kdl_string() {
@@ -1213,6 +1316,9 @@ resolve_terminal_backend() {
     wezterm)
       printf 'wezterm'
       ;;
+    herdr)
+      printf 'herdr'
+      ;;
     windows-terminal|windows_terminal|windows|wt)
       printf 'windows-terminal'
       ;;
@@ -1220,8 +1326,61 @@ resolve_terminal_backend() {
       printf 'none'
       ;;
     *)
-      echo "wtup: unknown WTUP_TERMINAL_BACKEND: $requested (expected: auto, wezterm, windows-terminal, none)" >&2
+      echo "wtup: unknown WTUP_TERMINAL_BACKEND: $requested (expected: auto, herdr, wezterm, windows-terminal, none)" >&2
       return 2
+      ;;
+  esac
+}
+
+herdr_context_available() {
+  local status_json=""
+  local protocol=""
+
+  [[ "${HERDR_ENV:-}" == "1" ]] || return 1
+  [[ -n "${HERDR_WORKSPACE_ID:-}" && -n "${HERDR_TAB_ID:-}" && -n "${HERDR_PANE_ID:-}" ]] || return 1
+  [[ -n "${HERDR_SOCKET_PATH:-}" ]] || return 1
+  command -v herdr >/dev/null 2>&1 || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  status_json="$(herdr status client --json 2>/dev/null)" || return 1
+  protocol="$(python3 - "$status_json" <<'PY'
+import json
+import sys
+
+try:
+    print(int(json.loads(sys.argv[1]).get("protocol", 0)))
+except (TypeError, ValueError, json.JSONDecodeError):
+    print(0)
+PY
+)"
+  [[ "$protocol" =~ ^[0-9]+$ ]] && (( protocol >= 17 )) || return 1
+  herdr workspace get "$HERDR_WORKSPACE_ID" >/dev/null 2>&1
+}
+
+resolve_workspace_backend() {
+  local requested="$1"
+
+  case "$requested" in
+    auto)
+      if herdr_context_available; then
+        printf 'herdr'
+      elif [[ "${HERDR_ENV:-}" == "1" ]]; then
+        echo "wtup: detected a Herdr pane, but its API is unavailable or older than protocol 17" >&2
+        echo "wtup: repair the Herdr session or explicitly use WTUP_WORKSPACE_BACKEND=zellij" >&2
+        return 1
+      else
+        printf 'zellij'
+      fi
+      ;;
+    herdr)
+      if ! herdr_context_available; then
+        echo "wtup: Herdr backend requires a Herdr-managed pane and protocol 17 or newer" >&2
+        return 1
+      fi
+      printf 'herdr'
+      ;;
+    zellij)
+      printf 'zellij'
       ;;
   esac
 }
@@ -1253,6 +1412,26 @@ ds_host=""
 consumer_host=""
 resolved_line=""
 
+workspace_backend="$(resolve_workspace_backend "$workspace_backend_request")"
+primary_creation_backend="git"
+if [[ "$workspace_backend" == "herdr" ]]; then
+  primary_creation_backend="herdr"
+  if [[ -n "${WTUP_ZELLIJ_LAYOUT:-}" ]]; then
+    echo "wtup: WTUP_ZELLIJ_LAYOUT is not supported by the Herdr backend" >&2
+    echo "wtup: use WTUP_WORKSPACE_BACKEND=zellij for custom Zellij KDL layouts" >&2
+    exit 2
+  fi
+  case "$wt_terminal_backend" in
+    ""|auto|herdr|none|off|0|false)
+      ;;
+    *)
+      echo "wtup: terminal backend '$wt_terminal_backend' conflicts with native Herdr composition" >&2
+      echo "wtup: use WTUP_TERMINAL_BACKEND=herdr, none, or WTUP_WORKSPACE_BACKEND=zellij" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 if [[ "$workflow" == "component-only" ]]; then
   if [[ -z "$ds_target" ]]; then
     if ! ds_target="$(prompt_for_required_target "aurora-ui")"; then
@@ -1260,7 +1439,9 @@ if [[ "$workflow" == "component-only" ]]; then
     fi
   fi
   ds_repo_hint="$(repo_hint_for_ds || true)"
-  IFS=$'\t' read -r ds_root ds_name < <(resolve_worktree_target "$ds_target" "$ds_repo_hint")
+  IFS=$'\t' read -r ds_root ds_name herdr_workspace_id herdr_tab_id herdr_root_pane_id herdr_already_open < <(
+    resolve_worktree_target "$ds_target" "$ds_repo_hint" "$primary_creation_backend"
+  )
   if [[ -z "$ds_root" || -z "$ds_name" ]]; then
     exit 1
   fi
@@ -1291,7 +1472,9 @@ if [[ "$workflow" == "consumer-context" ]]; then
   fi
 
   ds_repo_hint="$(repo_hint_for_ds || true)"
-  IFS=$'\t' read -r ds_root ds_name < <(resolve_worktree_target "$ds_target" "$ds_repo_hint")
+  IFS=$'\t' read -r ds_root ds_name herdr_workspace_id herdr_tab_id herdr_root_pane_id herdr_already_open < <(
+    resolve_worktree_target "$ds_target" "$ds_repo_hint" "$primary_creation_backend"
+  )
   if [[ -z "$ds_root" || -z "$ds_name" ]]; then
     exit 1
   fi
@@ -1315,7 +1498,7 @@ if [[ "$workflow" == "consumer-context" ]]; then
       echo "wtup: error: --consumer must be an existing worktree path, or set WTUP_CONSUMER_REPO_ROOT for branch targets" >&2
       exit 1
     fi
-    IFS=$'\t' read -r consumer_root consumer_name < <(resolve_worktree_target "$consumer_target" "$consumer_repo_hint")
+    IFS=$'\t' read -r consumer_root consumer_name < <(resolve_worktree_target "$consumer_target" "$consumer_repo_hint" "git")
     if [[ -z "$consumer_root" || -z "$consumer_name" ]]; then
       exit 1
     fi
@@ -1364,13 +1547,19 @@ if [[ "$workflow" == "consumer-context" ]]; then
 fi
 
 if [[ "$workflow" == "auto" ]]; then
-  IFS=$'\t' read -r wt_root wt_name < <(resolve_worktree_target "$arg" "")
+  IFS=$'\t' read -r wt_root wt_name herdr_workspace_id herdr_tab_id herdr_root_pane_id herdr_already_open < <(
+    resolve_worktree_target "$arg" "" "$primary_creation_backend"
+  )
   if [[ -z "$wt_root" || -z "$wt_name" ]]; then
     exit 1
   fi
 fi
 
-wt_host="${WORKTREE_HOST:-"$(slugify "$wt_name")"}"
+inherited_worktree_host="${WORKTREE_HOST:-}"
+if [[ "${WTUP_MANAGED_ENV:-}" == "1" ]]; then
+  inherited_worktree_host=""
+fi
+wt_host="${WTUP_WORKTREE_HOST:-${inherited_worktree_host:-"$(slugify "$wt_name")"}}"
 if [[ -z "$wt_host" ]]; then
   echo "wtup: could not derive a portless-safe name from: $wt_name" >&2
   exit 1
@@ -1461,7 +1650,18 @@ if [[ "$carry_changes" == "1" ]]; then
   fi
 fi
 
-tools_backend="$(resolve_terminal_backend "$wt_terminal_backend")"
+if [[ "$workspace_backend" == "herdr" ]]; then
+  case "$wt_terminal_backend" in
+    none|off|0|false)
+      tools_backend="none"
+      ;;
+    *)
+      tools_backend="herdr"
+      ;;
+  esac
+else
+  tools_backend="$(resolve_terminal_backend "$wt_terminal_backend")"
+fi
 
 # Open configured tool commands in a sibling terminal context.
 if [[ "$tools_backend" == "wezterm" ]] && (( ${#wt_agent_commands[@]} > 0 )); then
@@ -1540,6 +1740,8 @@ export WORKTREE_NAME="$wt_name"
 export WORKTREE_HOST="$wt_host"
 export WTUP_PROJECT_CONFIG="$wt_project_config"
 export WTUP_WORKFLOW="$workflow"
+export WTUP_ROOT="$wt_root"
+export WTUP_MANAGED_ENV=1
 
 if [[ "$workflow" == "component-only" || "$workflow" == "consumer-context" ]]; then
   if [[ -z "$ds_channel" ]]; then
@@ -1564,6 +1766,58 @@ if [[ "$workflow" == "consumer-context" ]]; then
   export AURORA_CONSUMER_WORKTREE="$consumer_root"
   export AURORA_CONSUMER_WORKTREE_HOST="$consumer_host"
   export AURORA_CONSUMER_KIND="$consumer_detected_kind"
+fi
+
+if [[ "$workspace_backend" == "herdr" ]]; then
+  if [[ -z "$herdr_workspace_id" || -z "$herdr_tab_id" || -z "$herdr_root_pane_id" ]]; then
+    echo "wtup: Herdr did not return the workspace, tab, and pane identifiers required for layout creation" >&2
+    exit 1
+  fi
+
+  if [[ "$reset_session" == "1" && "$herdr_already_open" == "1" ]]; then
+    if [[ "$herdr_workspace_id" == "${HERDR_WORKSPACE_ID:-}" ]]; then
+      echo "wtup: cannot reset the Herdr workspace that is running this command" >&2
+      echo "wtup: run the reset from another Herdr workspace" >&2
+      exit 1
+    fi
+
+    herdr workspace close "$herdr_workspace_id" >/dev/null
+    herdr_reset_json="$(herdr worktree open \
+      --cwd "$wt_root" \
+      --path "$wt_root" \
+      --label "$wt_name" \
+      --no-focus \
+      --json)"
+    herdr_reset_fields="$(parse_herdr_worktree_result "$herdr_reset_json")"
+    IFS=$'\t' read -r herdr_workspace_id herdr_tab_id herdr_root_pane_id herdr_already_open <<<"$herdr_reset_fields"
+  fi
+
+  if [[ "$herdr_already_open" == "1" ]]; then
+    herdr workspace focus "$herdr_workspace_id" >/dev/null
+    exit 0
+  fi
+
+  export WTUP_HERDR_WORKSPACE_ID="$herdr_workspace_id"
+  export WTUP_HERDR_TAB_ID="$herdr_tab_id"
+  export WTUP_HERDR_ROOT_PANE_ID="$herdr_root_pane_id"
+  export WTUP_CONSUMER_HAS_BACKEND="$consumer_has_backend"
+  export WTUP_TERMINAL_BACKEND="$tools_backend"
+
+  herdr workspace rename "$herdr_workspace_id" "$wt_name" >/dev/null
+
+  wtup_script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+  wtup_script_dir="$(cd "$(dirname "$wtup_script_path")" && pwd -P)"
+  if command -v wtup-herdr >/dev/null 2>&1; then
+    wtup_herdr_bin="$(command -v wtup-herdr)"
+  elif [[ -x "$wtup_script_dir/wtup-herdr" ]]; then
+    wtup_herdr_bin="$wtup_script_dir/wtup-herdr"
+  else
+    echo "wtup: wtup-herdr helper is not installed" >&2
+    exit 1
+  fi
+
+  "$wtup_herdr_bin"
+  exit 0
 fi
 
 # Generate a per-worktree layout so the first tab name is correct without runtime renames

@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+fake_bin="$tmp/bin"
+log="$tmp/herdr.log"
+mkdir -p "$fake_bin"
+
+cat >"$fake_bin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${WTUP_TEST_HERDR_LOG:?}"
+
+case "${1:-} ${2:-}" in
+  "status client")
+    printf '{"version":"0.7.5","protocol":%s}\n' "${WTUP_TEST_PROTOCOL:-17}"
+    ;;
+  "worktree open")
+    printf '{"result":{"type":"worktree_opened","workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"},"already_open":%s}}\n' "${WTUP_TEST_ALREADY_OPEN:-false}"
+    ;;
+  "worktree create")
+    previous=""
+    for arg in "$@"; do
+      if [[ "$previous" == "--path" ]]; then
+        mkdir -p "$arg"
+        break
+      fi
+      previous="$arg"
+    done
+    printf '{"result":{"type":"worktree_created","workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"},"worktree":{}}}\n'
+    ;;
+  "tab create")
+    count_file="${WTUP_TEST_COUNTER:?}"
+    count="$(cat "$count_file" 2>/dev/null || printf 1)"
+    count=$((count + 1))
+    printf '%s' "$count" >"$count_file"
+    printf '{"result":{"type":"tab_created","tab":{"tab_id":"w9:t%s"},"root_pane":{"pane_id":"w9:p%s"}}}\n' "$count" "$count"
+    ;;
+  "pane split")
+    count_file="${WTUP_TEST_COUNTER:?}"
+    count="$(cat "$count_file" 2>/dev/null || printf 1)"
+    count=$((count + 1))
+    printf '%s' "$count" >"$count_file"
+    printf '{"result":{"type":"pane_info","pane":{"pane_id":"w9:p%s"}}}\n' "$count"
+    ;;
+  *)
+    printf '{"result":{}}\n'
+    ;;
+esac
+SH
+chmod 755 "$fake_bin/herdr"
+
+cat >"$fake_bin/zellij" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${WTUP_TEST_ZELLIJ_LOG:?}"
+SH
+chmod 755 "$fake_bin/zellij"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_log() {
+  local pattern="$1"
+  rg -q -- "$pattern" "$log" || fail "missing Herdr call matching: $pattern"
+}
+
+assert_no_log() {
+  local pattern="$1"
+  if rg -q -- "$pattern" "$log"; then
+    fail "unexpected Herdr call matching: $pattern"
+  fi
+}
+
+run_helper() {
+  : >"$log"
+  printf '1' >"$tmp/counter"
+  PATH="$fake_bin:$PATH" \
+  WTUP_TEST_HERDR_LOG="$log" \
+  WTUP_TEST_COUNTER="$tmp/counter" \
+  WTUP_HERDR_WORKSPACE_ID=w9 \
+  WTUP_HERDR_TAB_ID=w9:t1 \
+  WTUP_HERDR_ROOT_PANE_ID=w9:p1 \
+  WTUP_ROOT="$repo_root" \
+  WORKTREE_NAME=test \
+  WORKTREE_HOST=test \
+  WTUP_TERMINAL_BACKEND="${WTUP_TERMINAL_BACKEND:-none}" \
+  "$repo_root/wtup-herdr"
+}
+
+run_native() {
+  : >"$log"
+  printf '1' >"$tmp/counter"
+  PATH="$fake_bin:$PATH" \
+  WTUP_TEST_HERDR_LOG="$log" \
+  WTUP_TEST_COUNTER="$tmp/counter" \
+  WTUP_TEST_ZELLIJ_LOG="$tmp/zellij.log" \
+  WTUP_WORKSPACE_BACKEND="${WTUP_WORKSPACE_BACKEND:-herdr}" \
+  WTUP_TERMINAL_BACKEND=none \
+  WTUP_PROJECT_CONFIG=frontend \
+  HERDR_ENV=1 \
+  HERDR_SOCKET_PATH="$tmp/herdr.sock" \
+  HERDR_WORKSPACE_ID=w1 \
+  HERDR_TAB_ID=w1:t1 \
+  HERDR_PANE_ID=w1:p1 \
+  "$repo_root/wtup" "$@"
+}
+
+run_native "$repo_root"
+assert_log '^status client --json$'
+assert_log 'worktree open .*--path .*/wtup .*--json'
+assert_log '^tab rename w9:t1 Dev$'
+assert_log '^pane split w9:p1 --direction right --ratio 0.62 '
+assert_log '^pane run w9:p1 env .* wtup-utility$'
+assert_log '^pane run .* env .* wtup-pane app$'
+assert_log '^tab create --workspace w9 .*--label Nvim '
+assert_log '^workspace report-metadata w9 --source wtup --token wtup_layout=auto:frontend:1$'
+assert_log '^workspace focus w9$'
+[[ ! -s "$tmp/zellij.log" ]] || fail "native mode invoked zellij"
+
+WTUP_WORKSPACE_BACKEND=auto run_native "$repo_root"
+assert_log '^worktree open '
+assert_log '^tab rename w9:t1 Dev$'
+
+entry_bin="$tmp/entry-bin"
+mkdir -p "$entry_bin"
+ln -s "$repo_root/wtup" "$entry_bin/wtup"
+: >"$log"
+printf '1' >"$tmp/counter"
+PATH="$fake_bin:$entry_bin:$PATH" \
+WTUP_TEST_HERDR_LOG="$log" \
+WTUP_TEST_COUNTER="$tmp/counter" \
+WTUP_TEST_ZELLIJ_LOG="$tmp/zellij.log" \
+WTUP_WORKSPACE_BACKEND=herdr \
+WTUP_TERMINAL_BACKEND=none \
+WTUP_PROJECT_CONFIG=frontend \
+HERDR_ENV=1 \
+HERDR_SOCKET_PATH="$tmp/herdr.sock" \
+HERDR_WORKSPACE_ID=w1 \
+HERDR_TAB_ID=w1:t1 \
+HERDR_PANE_ID=w1:p1 \
+"$entry_bin/wtup" "$repo_root"
+assert_log '^tab rename w9:t1 Dev$'
+
+if WTUP_TEST_PROTOCOL=16 WTUP_WORKSPACE_BACKEND=auto run_native "$repo_root" >"$tmp/protocol.out" 2>&1; then
+  fail "old Herdr protocol silently fell back"
+fi
+rg -q 'older than protocol 17' "$tmp/protocol.out" || fail "old Herdr protocol error was not reported"
+[[ ! -s "$tmp/zellij.log" ]] || fail "old Herdr protocol invoked zellij"
+
+WTUP_TEST_ALREADY_OPEN=true run_native "$repo_root"
+assert_log '^workspace focus w9$'
+assert_no_log '^tab create '
+assert_no_log '^pane split '
+
+branch="test/herdr-native-$$"
+worktrees_dir="$tmp/worktrees"
+WTUP_WORKTREES_DIR="$worktrees_dir" \
+WTUP_MAIN_REMOTE=missing \
+run_native "$branch"
+assert_log "worktree create .*--branch $branch --base HEAD --path $worktrees_dir/test-herdr-native-$$ "
+[[ -d "$worktrees_dir/test-herdr-native-$$" ]] || fail "fake Herdr worktree path was not used"
+
+if WTUP_ZELLIJ_LAYOUT=custom run_native "$repo_root" >"$tmp/custom.out" 2>&1; then
+  fail "custom KDL was accepted in Herdr mode"
+fi
+rg -q 'WTUP_ZELLIJ_LAYOUT is not supported' "$tmp/custom.out" ||
+  fail "custom KDL error was not reported"
+
+: >"$tmp/zellij.log"
+PATH="$fake_bin:$PATH" \
+HOME="$tmp/home" \
+WTUP_TEST_ZELLIJ_LOG="$tmp/zellij.log" \
+WTUP_TERMINAL_BACKEND=none \
+WTUP_WORKSPACE_BACKEND=zellij \
+WTUP_PROJECT_CONFIG=frontend \
+"$repo_root/wtup" "$repo_root"
+rg -q -- '-s main -n ' "$tmp/zellij.log" || fail "legacy Zellij backend was not invoked"
+
+WTUP_WORKFLOW=auto WTUP_PROJECT_CONFIG=fullstack run_helper
+assert_log '^tab rename w9:t1 Overview$'
+assert_log '^tab create --workspace w9 .*--label Services '
+assert_log '^pane run .* env .* wtup-pane frontend$'
+assert_log '^pane run .* env .* wtup-pane backend$'
+assert_log '^pane run .* env .* wtup-pane storybook$'
+
+WTUP_WORKFLOW=component-only WTUP_PROJECT_CONFIG=component-only \
+AURORA_UI_WORKTREE="$repo_root" \
+run_helper
+assert_log '^tab rename w9:t1 Design System$'
+assert_log '^pane run .* env .* wtup-pane ds-storybook$'
+assert_log '^pane run .* env .* wtup-pane ds-components$'
+
+WTUP_WORKFLOW=consumer-context WTUP_PROJECT_CONFIG=consumer-context \
+WTUP_CONSUMER_HAS_BACKEND=1 \
+AURORA_UI_WORKTREE="$repo_root" \
+AURORA_CONSUMER_WORKTREE="$repo_root" \
+run_helper
+assert_log '^tab create --workspace w9 .*--label Apps '
+assert_log '^pane run .* env .* wtup-pane consumer-app$'
+assert_log '^pane run .* env .* wtup-pane consumer-backend$'
+
+WTUP_WORKFLOW=auto WTUP_PROJECT_CONFIG=frontend \
+WTUP_TERMINAL_BACKEND=herdr \
+WTUP_TOOL_COMMANDS='codex,custom-tool --watch' \
+run_helper
+assert_log '^tab create --workspace w9 .*--label Agents '
+assert_log '^agent start codex --kind codex --pane '
+assert_log '^pane run .* bash -ic exec custom-tool --watch$'
+
+echo "wtup tests passed"
