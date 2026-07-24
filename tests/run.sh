@@ -54,6 +54,14 @@ case "${1:-} ${2:-}" in
     printf '%s' "$count" >"$count_file"
     printf '{"result":{"type":"pane_info","pane":{"pane_id":"w9:p%s"}}}\n' "$count"
     ;;
+  "agent start")
+    if [[ "${WTUP_TEST_AGENT_BUSY_ONCE:-0}" == "1" && ! -f "${WTUP_TEST_AGENT_STATE:?}" ]]; then
+      : >"$WTUP_TEST_AGENT_STATE"
+      printf '{"error":{"code":"agent_pane_busy","message":"shell starting"}}\n' >&2
+      exit 1
+    fi
+    printf '{"result":{}}\n'
+    ;;
   *)
     printf '{"result":{}}\n'
     ;;
@@ -88,9 +96,11 @@ assert_no_log() {
 run_helper() {
   : >"$log"
   printf '1' >"$tmp/counter"
+  rm -f "$tmp/agent-state"
   PATH="$fake_bin:$PATH" \
   WTUP_TEST_HERDR_LOG="$log" \
   WTUP_TEST_COUNTER="$tmp/counter" \
+  WTUP_TEST_AGENT_STATE="$tmp/agent-state" \
   WTUP_HERDR_WORKSPACE_ID=w9 \
   WTUP_HERDR_TAB_ID=w9:t1 \
   WTUP_HERDR_ROOT_PANE_ID=w9:p1 \
@@ -246,9 +256,12 @@ assert_log '^pane run .* env .* wtup-pane consumer-backend$'
 WTUP_WORKFLOW=auto WTUP_PROJECT_CONFIG=frontend \
 WTUP_TERMINAL_BACKEND=herdr \
 WTUP_TOOL_COMMANDS='codex,custom-tool --watch' \
+WTUP_TEST_AGENT_BUSY_ONCE=1 \
 run_helper
 assert_log '^tab create --workspace w9 .*--label Agents '
 assert_log '^agent start codex --kind codex --pane '
+[[ "$(rg -c '^agent start codex ' "$log")" == "2" ]] ||
+  fail "busy agent pane was not retried"
 assert_log '^pane run .* bash -ic exec custom-tool --watch$'
 
 verify_contract() {

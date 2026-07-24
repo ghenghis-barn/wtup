@@ -120,13 +120,26 @@ start_tool() {
   local command="$2"
   local kind="${command%% *}"
   local label="$kind"
+  local output=""
+  local attempt=0
 
   [[ -n "$label" ]] || label="tool"
   rename_pane "$pane_id" "$label"
 
   case "$command" in
     pi|claude|codex|gemini|cursor|devin|agy|cline|omp|mastracode|opencode|copilot|kimi|kiro|droid|amp|grok|hermes|kilo|qodercli|maki)
-      herdr agent start "$label" --kind "$kind" --pane "$pane_id" >/dev/null
+      for (( attempt=1; attempt<=50; attempt++ )); do
+        if output="$(herdr agent start "$label" --kind "$kind" --pane "$pane_id" 2>&1)"; then
+          return
+        fi
+        if [[ "$output" != *'"code":"agent_pane_busy"'* ]]; then
+          printf '%s\n' "$output" >&2
+          return 1
+        fi
+        sleep 0.1
+      done
+      printf '%s\n' "$output" >&2
+      return 1
       ;;
     *)
       herdr pane run "$pane_id" bash -ic "exec ${command}" >/dev/null
@@ -183,6 +196,9 @@ fi
 declare -A pane_ids=()
 tab_count=0
 layout_records="$("$layout_bin" "${layout_args[@]}")"
+herdr workspace report-metadata "$workspace_id" \
+  --source wtup \
+  --token "wtup_layout=${workflow}:${project_config}:2:building" >/dev/null
 while IFS=$'\t' read -r record first second third fourth fifth; do
   case "$record" in
     TAB)
