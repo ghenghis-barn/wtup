@@ -128,6 +128,16 @@ WTUP_WORKSPACE_BACKEND=auto run_native "$repo_root"
 assert_log '^worktree open '
 assert_log '^tab rename w9:t1 Dev$'
 
+linked_repo="$tmp/linked-repo"
+linked_checkout="$tmp/linked-checkout"
+git init -q "$linked_repo"
+git -C "$linked_repo" config user.name "wtup test"
+git -C "$linked_repo" config user.email "wtup-test@example.invalid"
+git -C "$linked_repo" commit -q --allow-empty -m init
+git -C "$linked_repo" worktree add -q -b linked-test "$linked_checkout"
+run_native "$linked_checkout"
+assert_log "^worktree open --cwd $linked_repo --path $linked_checkout "
+
 entry_bin="$tmp/entry-bin"
 mkdir -p "$entry_bin"
 ln -s "$repo_root/wtup" "$entry_bin/wtup"

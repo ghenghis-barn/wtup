@@ -549,6 +549,18 @@ resolve_common_repo_root() {
   fi
 }
 
+resolve_herdr_source_root() {
+  local checkout_root="$1"
+  local common_root=""
+
+  common_root="$(resolve_common_repo_root "$checkout_root")"
+  if [[ -n "$common_root" ]]; then
+    printf '%s' "$common_root"
+  else
+    printf '%s' "$checkout_root"
+  fi
+}
+
 trim_whitespace() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -809,6 +821,7 @@ resolve_worktree_target() {
   local main_sha=""
   local herdr_json=""
   local herdr_fields=""
+  local herdr_source_root=""
 
   if [[ -z "$target" ]]; then
     echo "wtup: internal error: resolve_worktree_target called without a target" >&2
@@ -931,8 +944,9 @@ resolve_worktree_target() {
       fi
 
       if [[ "$creation_backend" == "herdr" ]]; then
+        herdr_source_root="$(resolve_herdr_source_root "$git_root")"
         if ! herdr_json="$(herdr worktree create \
-          --cwd "$git_root" \
+          --cwd "$herdr_source_root" \
           --branch "$resolved_name" \
           --base "$base_ref" \
           --path "$resolved_root" \
@@ -954,8 +968,9 @@ resolve_worktree_target() {
   fi
 
   if [[ "$creation_backend" == "herdr" ]]; then
+    herdr_source_root="$(resolve_herdr_source_root "$resolved_root")"
     if ! herdr_json="$(herdr worktree open \
-      --cwd "$resolved_root" \
+      --cwd "$herdr_source_root" \
       --path "$resolved_root" \
       --label "$resolved_name" \
       --no-focus \
@@ -1603,8 +1618,9 @@ if [[ "$workspace_backend" == "herdr" ]]; then
     fi
 
     herdr workspace close "$herdr_workspace_id" >/dev/null
+    herdr_reset_source_root="$(resolve_herdr_source_root "$wt_root")"
     herdr_reset_json="$(herdr worktree open \
-      --cwd "$wt_root" \
+      --cwd "$herdr_reset_source_root" \
       --path "$wt_root" \
       --label "$wt_name" \
       --no-focus \
