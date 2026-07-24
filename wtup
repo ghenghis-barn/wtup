@@ -18,6 +18,7 @@ herdr_workspace_id=""
 herdr_tab_id=""
 herdr_root_pane_id=""
 herdr_already_open=0
+herdr_append_layout=0
 
 print_help() {
   cat <<'EOF' >&2
@@ -1013,6 +1014,29 @@ print(f"{workspace_id}\t{tab_id}\t{pane_id}\t{already_open}")
 PY
 }
 
+get_herdr_layout_token() {
+  local workspace_id="$1"
+  local workspace_json=""
+
+  if ! workspace_json="$(herdr workspace get "$workspace_id")"; then
+    echo "wtup: failed to inspect Herdr workspace layout state: $workspace_id" >&2
+    return 1
+  fi
+
+  python3 - "$workspace_json" <<'PY'
+import json
+import sys
+
+try:
+    workspace = json.loads(sys.argv[1])["result"]["workspace"]
+except (KeyError, TypeError, json.JSONDecodeError) as exc:
+    print(f"wtup: invalid Herdr workspace response: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print((workspace.get("tokens") or {}).get("wtup_layout", ""))
+PY
+}
+
 escape_bash_double_quoted() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -1630,13 +1654,23 @@ if [[ "$workspace_backend" == "herdr" ]]; then
   fi
 
   if [[ "$herdr_already_open" == "1" ]]; then
-    herdr workspace focus "$herdr_workspace_id" >/dev/null
-    exit 0
+    herdr_layout_token="$(get_herdr_layout_token "$herdr_workspace_id")"
+    expected_herdr_layout="${workflow}:${wt_project_config}:2"
+    if [[ "$herdr_layout_token" == "$expected_herdr_layout" ]]; then
+      herdr workspace focus "$herdr_workspace_id" >/dev/null
+      exit 0
+    elif [[ -n "$herdr_layout_token" ]]; then
+      echo "wtup: Herdr workspace has layout '$herdr_layout_token'; expected '$expected_herdr_layout'" >&2
+      echo "wtup: run wtup --reset from another Herdr workspace to rebuild it" >&2
+      exit 1
+    fi
+    herdr_append_layout=1
   fi
 
   export WTUP_HERDR_WORKSPACE_ID="$herdr_workspace_id"
   export WTUP_HERDR_TAB_ID="$herdr_tab_id"
   export WTUP_HERDR_ROOT_PANE_ID="$herdr_root_pane_id"
+  export WTUP_HERDR_APPEND_LAYOUT="$herdr_append_layout"
   export WTUP_CONSUMER_HAS_BACKEND="$consumer_has_backend"
   export WTUP_TERMINAL_BACKEND="$tools_backend"
 

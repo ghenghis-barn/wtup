@@ -86,10 +86,12 @@ Use `WTUP_WORKSPACE_BACKEND=zellij` to force the legacy multiplexer path.
 `WTUP_ZELLIJ_LAYOUT` is intentionally rejected by the Herdr backend because
 arbitrary KDL cannot be translated reliably to Herdr's pane tree.
 
-Re-running `wtup` for an already-open Herdr worktree focuses its workspace
-without duplicating tabs or processes. `--reset` closes and rebuilds an open
-target workspace, but must be invoked from a different Herdr workspace so the
-command cannot terminate its own pane.
+Re-running `wtup` for an already initialized Herdr worktree focuses its
+workspace without duplicating tabs or processes. If Herdr already has a generic
+workspace for the worktree but no `wtup_layout` metadata, `wtup` preserves its
+existing shell and adds the canonical layout in new tabs. A different recorded
+layout version requires `--reset`; reset closes and rebuilds the target and must
+be invoked from another Herdr workspace so the command cannot terminate itself.
 
 ## Canonical workspace model
 

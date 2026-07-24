@@ -4,6 +4,7 @@ set -euo pipefail
 workspace_id="${WTUP_HERDR_WORKSPACE_ID:?WTUP_HERDR_WORKSPACE_ID is required}"
 main_tab_id="${WTUP_HERDR_TAB_ID:?WTUP_HERDR_TAB_ID is required}"
 root_pane_id="${WTUP_HERDR_ROOT_PANE_ID:?WTUP_HERDR_ROOT_PANE_ID is required}"
+append_layout="${WTUP_HERDR_APPEND_LAYOUT:-0}"
 workflow="${WTUP_WORKFLOW:-auto}"
 project_config="${WTUP_PROJECT_CONFIG:-fullstack}"
 wt_root="${WTUP_ROOT:?WTUP_ROOT is required}"
@@ -189,13 +190,16 @@ while IFS=$'\t' read -r record first second third fourth fifth; do
       tab_label="$(decode "$second")"
       tab_cwd="$(decode "$third")"
       root_key="$fourth"
-      if (( tab_count == 0 )); then
+      if (( tab_count == 0 )) && [[ "$append_layout" != "1" ]]; then
         rename_tab "$main_tab_id" "$tab_label"
         pane_ids["$root_key"]="$root_pane_id"
       else
         fields="$(create_tab "$tab_label" "$tab_cwd")"
         IFS=$'\t' read -r created_tab created_pane <<<"$fields"
         pane_ids["$root_key"]="$created_pane"
+        if (( tab_count == 0 )); then
+          main_tab_id="$created_tab"
+        fi
       fi
       tab_count=$((tab_count + 1))
       ;;

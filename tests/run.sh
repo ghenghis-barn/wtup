@@ -19,6 +19,13 @@ case "${1:-} ${2:-}" in
   "status client")
     printf '{"version":"0.7.5","protocol":%s}\n' "${WTUP_TEST_PROTOCOL:-17}"
     ;;
+  "workspace get")
+    if [[ -n "${WTUP_TEST_LAYOUT_TOKEN:-}" ]]; then
+      printf '{"result":{"type":"workspace_info","workspace":{"workspace_id":"%s","tokens":{"wtup_layout":"%s"}}}}\n' "${3:-w1}" "$WTUP_TEST_LAYOUT_TOKEN"
+    else
+      printf '{"result":{"type":"workspace_info","workspace":{"workspace_id":"%s","tokens":{}}}}\n' "${3:-w1}"
+    fi
+    ;;
   "worktree open")
     printf '{"result":{"type":"worktree_opened","workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"},"already_open":%s}}\n' "${WTUP_TEST_ALREADY_OPEN:-false}"
     ;;
@@ -164,10 +171,26 @@ fi
 rg -q 'older than protocol 17' "$tmp/protocol.out" || fail "old Herdr protocol error was not reported"
 [[ ! -s "$tmp/zellij.log" ]] || fail "old Herdr protocol invoked zellij"
 
-WTUP_TEST_ALREADY_OPEN=true run_native "$repo_root"
+WTUP_TEST_ALREADY_OPEN=true \
+WTUP_TEST_LAYOUT_TOKEN=auto:frontend:2 \
+run_native "$repo_root"
 assert_log '^workspace focus w9$'
 assert_no_log '^tab create '
 assert_no_log '^pane split '
+
+WTUP_TEST_ALREADY_OPEN=true run_native "$repo_root"
+assert_log '^tab create --workspace w9 .*--label Dev '
+assert_log '^pane split '
+assert_log '^workspace report-metadata w9 --source wtup --token wtup_layout=auto:frontend:2$'
+assert_no_log '^tab rename w9:t1 Dev$'
+
+if WTUP_TEST_ALREADY_OPEN=true \
+  WTUP_TEST_LAYOUT_TOKEN=auto:frontend:1 \
+  run_native "$repo_root" >"$tmp/layout-version.out" 2>&1; then
+  fail "mismatched Herdr layout version was accepted"
+fi
+rg -q 'run wtup --reset' "$tmp/layout-version.out" ||
+  fail "mismatched Herdr layout did not report reset guidance"
 
 branch="test/herdr-native-$$"
 worktrees_dir="$tmp/worktrees"
