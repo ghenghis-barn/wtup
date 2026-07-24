@@ -91,6 +91,24 @@ without duplicating tabs or processes. `--reset` closes and rebuilds an open
 target workspace, but must be invoked from a different Herdr workspace so the
 command cannot terminate its own pane.
 
+## Canonical workspace model
+
+The supported `fullstack`, `frontend`, `component-only`, and
+`consumer-context` topologies are defined once in the internal
+`libexec/wtup-layout` model. It owns tab labels, pane roles, commands, working
+directories, split directions, and ratios.
+
+The Zellij path renders that model to generated KDL. The internal Herdr backend
+consumes an ordered operation stream from the same model and translates it to
+workspace, tab, and pane API calls. Contract tests validate every supported
+preset and ensure its tabs, panes, commands, and working directories are present
+in the KDL renderer as well as the Herdr command graph.
+
+Tool placement remains an explicit backend policy: Herdr uses an `Agents` tab,
+while the Zellij path retains its existing WezTerm or Windows Terminal tools
+context. Setting `WTUP_ZELLIJ_LAYOUT` intentionally opts out of the shared model
+for a custom Zellij-only layout.
+
 ## Design System Contribution Workflows
 
 The default `auto` workflow is unchanged and remains what you get from `wtup <target>`.
@@ -308,7 +326,9 @@ Use the installer from the repo root:
 ./install.sh
 ```
 
-That installs symlinks into `~/.local/bin` by default, so local repo changes are picked up immediately.
+That installs the public `wtup` scripts into `~/.local/bin` and internal backend
+helpers into `~/.local/libexec/wtup`. Symlink mode is the default, so local repo
+changes are picked up immediately.
 
 For a static copied install:
 

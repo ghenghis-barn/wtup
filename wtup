@@ -128,13 +128,12 @@ BEHAVIOR
   - Zellij
     - Session name: WORKTREE_HOST (a portless-safe slug of the worktree name)
     - Layout preset: auto-detected unless WTUP_PROJECT_CONFIG is set
-    - Layout: WTUP_ZELLIJ_LAYOUT
-      - default for fullstack: prototyping_portless
-      - default for frontend: wtup_frontend
+    - Supported presets are rendered from the same canonical workspace model
+      used by Herdr.
+    - WTUP_ZELLIJ_LAYOUT opts into an external Zellij-only layout.
     - Default auto-detection matches forged-realms worktrees to frontend.
       Everything else falls back to fullstack.
-    - Per-worktree layout is generated at: ~/.cache/wtup/layouts/<host>.kdl
-      so the first tab name includes the worktree name.
+    - Per-worktree layout is generated at: ~/.cache/wtup/layouts/<host>.kdl.
     - EXITED sessions are deleted automatically (to avoid resurrecting stale
       layouts/commands).
 
@@ -188,8 +187,8 @@ ENVIRONMENT VARIABLES
 
   Zellij / layout
     WTUP_ZELLIJ_LAYOUT   Zellij layout name (file in ~/.config/zellij/layouts/).
-                         If unset, wtup picks a preset-specific default layout.
-                         The frontend preset falls back to a built-in layout.
+                         If unset, wtup renders the selected preset from its
+                         canonical backend-neutral workspace model.
 
   Workspace backend
     WTUP_WORKSPACE_BACKEND
@@ -999,13 +998,6 @@ print(f"{workspace_id}\t{tab_id}\t{pane_id}\t{already_open}")
 PY
 }
 
-escape_kdl_string() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '%s' "$value"
-}
-
 escape_bash_double_quoted() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -1013,190 +1005,25 @@ escape_bash_double_quoted() {
   printf '%s' "$value"
 }
 
-write_builtin_frontend_layout() {
-  local dst="$1"
-  local worktree_title="$2"
-  local escaped_title
+resolve_internal_helper() {
+  local name="$1"
+  local script_path=""
+  local script_dir=""
+  local candidate=""
 
-  escaped_title="$(escape_kdl_string "$worktree_title")"
+  script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+  script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
+  for candidate in \
+    "$script_dir/libexec/$name" \
+    "$script_dir/../libexec/wtup/$name"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
 
-  cat > "$dst" <<EOF
-layout {
-    cwd "."
-    tab name="[WT] - ${escaped_title}" focus=true hide_floating_panes=true {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane split_direction="vertical" {
-            pane command="wtup-utility" name="Workspace Summary" cwd="." focus=true size="38%" {
-            }
-            pane split_direction="horizontal" size="62%" {
-                pane command="wtup-pane" name="[BgT]---Frontend" cwd="." size="48%" {
-                    args "app"
-                }
-                pane command="bash" name="Utility Bash" cwd="." size="26%" {
-                }
-                pane command="bash" name="Scratch Bash" cwd="." size="26%" {
-                }
-            }
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-    tab name="Nvim" hide_floating_panes=true {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane command="nvim" cwd="." {
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-    new_tab_template {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane cwd="."
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-}
-EOF
-}
-
-write_builtin_component_only_layout() {
-  local dst="$1"
-  local worktree_title="$2"
-  local escaped_title
-
-  escaped_title="$(escape_kdl_string "$worktree_title")"
-
-  cat > "$dst" <<EOF
-layout {
-    cwd "."
-    tab name="[DS] - ${escaped_title}" focus=true hide_floating_panes=true {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane split_direction="vertical" {
-            pane command="wtup-utility" name="DS Summary" cwd="." focus=true size="36%" {
-            }
-            pane split_direction="horizontal" size="64%" {
-                pane command="wtup-pane" name="[DS]---Storybook v2" cwd="." size="58%" {
-                    args "ds-storybook"
-                }
-                pane command="wtup-pane" name="[DS]---components-v2" cwd="." size="42%" {
-                    args "ds-components"
-                }
-            }
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-    tab name="Nvim" hide_floating_panes=true {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane command="nvim" cwd="." {
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-    new_tab_template {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane cwd="."
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-}
-EOF
-}
-
-write_builtin_consumer_context_layout() {
-  local dst="$1"
-  local worktree_title="$2"
-  local ds_root_arg="$3"
-  local consumer_root_arg="$4"
-  local include_backend="$5"
-  local escaped_title
-  local escaped_ds_root
-  local escaped_consumer_root
-  local backend_pane=""
-  local ds_storybook_size="36%"
-  local consumer_app_size="36%"
-  local utility_size="28%"
-
-  escaped_title="$(escape_kdl_string "$worktree_title")"
-  escaped_ds_root="$(escape_kdl_string "$ds_root_arg")"
-  escaped_consumer_root="$(escape_kdl_string "$consumer_root_arg")"
-
-  if [[ "$include_backend" == "1" ]]; then
-    ds_storybook_size="30%"
-    consumer_app_size="30%"
-    utility_size="20%"
-    backend_pane=$(cat <<EOF_BACKEND
-                pane command="wtup-pane" name="[Consumer]---Backend" cwd="${escaped_consumer_root}" size="20%" {
-                    args "consumer-backend"
-                }
-EOF_BACKEND
-)
-  fi
-
-  cat > "$dst" <<EOF
-layout {
-    cwd "${escaped_ds_root}"
-    tab name="[DS+App] - ${escaped_title}" focus=true hide_floating_panes=true {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane split_direction="vertical" {
-            pane command="wtup-utility" name="DS Consumer Summary" cwd="${escaped_ds_root}" focus=true size="34%" {
-            }
-            pane split_direction="horizontal" size="66%" {
-                pane command="wtup-pane" name="[DS]---Storybook v2" cwd="${escaped_ds_root}" size="${ds_storybook_size}" {
-                    args "ds-storybook"
-                }
-                pane command="wtup-pane" name="[Consumer]---App" cwd="${escaped_consumer_root}" size="${consumer_app_size}" {
-                    args "consumer-app"
-                }
-${backend_pane}
-                pane command="bash" name="Utility Bash" cwd="${escaped_consumer_root}" size="${utility_size}" {
-                }
-            }
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-    tab name="Nvim" hide_floating_panes=true {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane command="nvim" cwd="${escaped_ds_root}" {
-        }
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-    new_tab_template {
-        pane size=1 borderless=true {
-            plugin location="zellij:tab-bar"
-        }
-        pane cwd="${escaped_ds_root}"
-        pane size=1 borderless=true {
-            plugin location="zellij:status-bar"
-        }
-    }
-}
-EOF
+  echo "wtup: internal helper is not installed: $name" >&2
+  return 1
 }
 
 append_windows_terminal_command() {
@@ -1568,11 +1395,7 @@ fi
 if [[ "$workflow" == "auto" ]]; then
   wt_project_config="$(detect_project_config "$wt_root" "$wt_name")"
   case "$wt_project_config" in
-    fullstack)
-      default_layout="prototyping_portless"
-      ;;
-    frontend)
-      default_layout="wtup_frontend"
+    fullstack|frontend)
       ;;
     *)
       echo "wtup: unknown WTUP_PROJECT_CONFIG: $wt_project_config (expected: fullstack or frontend)" >&2
@@ -1581,12 +1404,10 @@ if [[ "$workflow" == "auto" ]]; then
   esac
 elif [[ "$workflow" == "component-only" ]]; then
   wt_project_config="component-only"
-  default_layout="wtup_component_only"
 else
   wt_project_config="consumer-context"
-  default_layout="wtup_consumer_context"
 fi
-wt_layout="${WTUP_ZELLIJ_LAYOUT:-$default_layout}"
+wt_layout="${WTUP_ZELLIJ_LAYOUT:-}"
 
 if [[ "$carry_changes" == "1" ]]; then
   if ! src_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
@@ -1805,36 +1626,29 @@ if [[ "$workspace_backend" == "herdr" ]]; then
 
   herdr workspace rename "$herdr_workspace_id" "$wt_name" >/dev/null
 
-  wtup_script_path="$(readlink -f "${BASH_SOURCE[0]}")"
-  wtup_script_dir="$(cd "$(dirname "$wtup_script_path")" && pwd -P)"
-  if command -v wtup-herdr >/dev/null 2>&1; then
-    wtup_herdr_bin="$(command -v wtup-herdr)"
-  elif [[ -x "$wtup_script_dir/wtup-herdr" ]]; then
-    wtup_herdr_bin="$wtup_script_dir/wtup-herdr"
-  else
-    echo "wtup: wtup-herdr helper is not installed" >&2
-    exit 1
-  fi
-
+  wtup_herdr_bin="$(resolve_internal_helper wtup-herdr)"
   "$wtup_herdr_bin"
   exit 0
 fi
 
-# Generate a per-worktree layout so the first tab name is correct without runtime renames
+# Generate supported layouts from the same canonical model used by Herdr.
 layout_arg="$wt_layout"
 layout_src="${HOME}/.config/zellij/layouts/${wt_layout}.kdl"
 layout_out="${HOME}/.cache/wtup/layouts/${wt_host}.kdl"
-if [[ "$workflow" == "component-only" ]] && [[ "$wt_layout" == "$default_layout" ]]; then
+if [[ -z "${WTUP_ZELLIJ_LAYOUT:-}" ]]; then
+  wtup_layout_bin="$(resolve_internal_helper wtup-layout)"
+  canonical_layout_args=(
+    kdl
+    --workflow "$workflow"
+    --project-config "$wt_project_config"
+    --root "$wt_root"
+    --consumer-root "${consumer_root:-$wt_root}"
+  )
+  if [[ "$consumer_has_backend" == "1" ]]; then
+    canonical_layout_args+=(--consumer-backend)
+  fi
   mkdir -p "$(dirname "$layout_out")"
-  write_builtin_component_only_layout "$layout_out" "$wt_name"
-  layout_arg="$layout_out"
-elif [[ "$workflow" == "consumer-context" ]] && [[ "$wt_layout" == "$default_layout" ]]; then
-  mkdir -p "$(dirname "$layout_out")"
-  write_builtin_consumer_context_layout "$layout_out" "$wt_name" "$ds_root" "$consumer_root" "$consumer_has_backend"
-  layout_arg="$layout_out"
-elif [[ "$wt_project_config" == "frontend" ]] && [[ "$wt_layout" == "$default_layout" ]] && [[ ! -f "$layout_src" ]]; then
-  mkdir -p "$(dirname "$layout_out")"
-  write_builtin_frontend_layout "$layout_out" "$wt_name"
+  "$wtup_layout_bin" "${canonical_layout_args[@]}" >"$layout_out"
   layout_arg="$layout_out"
 elif [[ -f "$layout_src" ]] && command -v python3 >/dev/null 2>&1; then
   mkdir -p "$(dirname "$layout_out")"

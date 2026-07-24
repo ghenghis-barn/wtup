@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""Canonical wtup workspace model and backend renderers."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+
+@dataclass(frozen=True)
+class Pane:
+    id: str
+    label: str
+    cwd: str
+    command: tuple[str, ...] = ()
+    role: str = "shell"
+
+
+@dataclass(frozen=True)
+class Split:
+    direction: str
+    ratio: float
+    first: "Node"
+    second: "Node"
+
+
+Node = Pane | Split
+
+
+@dataclass(frozen=True)
+class Tab:
+    id: str
+    label: str
+    root: Node
+
+
+def pane(
+    pane_id: str,
+    label: str,
+    cwd: str,
+    *command: str,
+    role: str = "shell",
+) -> Pane:
+    return Pane(pane_id, label, cwd, tuple(command), role)
+
+
+def split(direction: str, ratio: float, first: Node, second: Node) -> Split:
+    return Split(direction, ratio, first, second)
+
+
+def workspace_model(
+    workflow: str,
+    project_config: str,
+    root: str,
+    consumer_root: str,
+    consumer_backend: bool,
+) -> list[Tab]:
+    summary = lambda pane_id, label, cwd=root: pane(
+        pane_id, label, cwd, "wtup-utility", role="summary"
+    )
+    shell = lambda pane_id, label, cwd=root: pane(pane_id, label, cwd)
+    wtup_role = lambda pane_id, label, cwd, role: pane(
+        pane_id, label, cwd, "wtup-pane", role, role=role
+    )
+    nvim = Tab(
+        "nvim",
+        "Nvim",
+        pane("nvim", "Nvim", root, "nvim", role="nvim"),
+    )
+
+    if workflow == "component-only":
+        primary = Tab(
+            "design-system",
+            "Design System",
+            split(
+                "right",
+                0.64,
+                summary("ds-summary", "DS Summary"),
+                split(
+                    "down",
+                    0.42,
+                    wtup_role("ds-storybook", "Storybook v2", root, "ds-storybook"),
+                    wtup_role(
+                        "ds-components",
+                        "components-v2",
+                        str(Path(root) / "packages/components-v2"),
+                        "ds-components",
+                    ),
+                ),
+            ),
+        )
+        return [primary, nvim]
+
+    if workflow == "consumer-context":
+        overview = Tab(
+            "overview",
+            "Overview",
+            split(
+                "right",
+                0.5,
+                summary("consumer-summary", "DS Consumer Summary"),
+                shell("consumer-utility", "Utility Bash", consumer_root),
+            ),
+        )
+        app: Node = wtup_role(
+            "consumer-app", "Consumer App", consumer_root, "consumer-app"
+        )
+        if consumer_backend:
+            app = split(
+                "down",
+                0.5,
+                app,
+                wtup_role(
+                    "consumer-backend",
+                    "Consumer Backend",
+                    consumer_root,
+                    "consumer-backend",
+                ),
+            )
+        apps = Tab(
+            "apps",
+            "Apps",
+            split(
+                "right",
+                0.6,
+                wtup_role(
+                    "ds-storybook", "DS Storybook v2", root, "ds-storybook"
+                ),
+                app,
+            ),
+        )
+        return [overview, apps, nvim]
+
+    if workflow != "auto":
+        raise ValueError(f"unknown workflow: {workflow}")
+
+    if project_config == "frontend":
+        dev = Tab(
+            "dev",
+            "Dev",
+            split(
+                "right",
+                0.62,
+                summary("summary", "Workspace Summary"),
+                split(
+                    "down",
+                    0.52,
+                    wtup_role("app", "App", root, "app"),
+                    split(
+                        "down",
+                        0.5,
+                        shell("utility", "Utility Bash"),
+                        shell("scratch", "Scratch Bash"),
+                    ),
+                ),
+            ),
+        )
+        return [dev, nvim]
+
+    if project_config == "fullstack":
+        overview = Tab(
+            "overview",
+            "Overview",
+            split(
+                "right",
+                0.5,
+                summary("summary", "Workspace Summary"),
+                shell("utility", "Utility Bash"),
+            ),
+        )
+        services = Tab(
+            "services",
+            "Services",
+            split(
+                "right",
+                0.5,
+                wtup_role("frontend", "Frontend", root, "frontend"),
+                split(
+                    "down",
+                    0.5,
+                    wtup_role(
+                        "backend",
+                        "Backend",
+                        str(Path(root) / "services/flexplorer-api/backend"),
+                        "backend",
+                    ),
+                    wtup_role("storybook", "Storybook", root, "storybook"),
+                ),
+            ),
+        )
+        return [overview, services, nvim]
+
+    raise ValueError(f"unknown project config: {project_config}")
+
+
+def leaves(node: Node) -> Iterable[Pane]:
+    if isinstance(node, Pane):
+        yield node
+        return
+    yield from leaves(node.first)
+    yield from leaves(node.second)
+
+
+def leftmost(node: Node) -> Pane:
+    while isinstance(node, Split):
+        node = node.first
+    return node
+
+
+def validate(tabs: list[Tab]) -> None:
+    tab_ids: set[str] = set()
+    pane_ids: set[str] = set()
+    for tab in tabs:
+        if tab.id in tab_ids:
+            raise ValueError(f"duplicate tab id: {tab.id}")
+        tab_ids.add(tab.id)
+        for item in leaves(tab.root):
+            if item.id in pane_ids:
+                raise ValueError(f"duplicate pane id: {item.id}")
+            if "\t" in item.cwd or "\n" in item.cwd:
+                raise ValueError(f"unsupported control character in cwd: {item.cwd!r}")
+            pane_ids.add(item.id)
+
+
+def kdl_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def ratio_text(value: float) -> str:
+    return f"{value * 100:g}%"
+
+
+def render_kdl_node(node: Node, indent: int) -> list[str]:
+    pad = " " * indent
+    if isinstance(node, Pane):
+        attributes = [f"name={kdl_quote(node.label)}", f"cwd={kdl_quote(node.cwd)}"]
+        if node.command:
+            attributes.insert(0, f"command={kdl_quote(node.command[0])}")
+            lines = [f"{pad}pane {' '.join(attributes)} {{"]
+            if len(node.command) > 1:
+                args = " ".join(kdl_quote(arg) for arg in node.command[1:])
+                lines.append(f"{pad}    args {args}")
+            lines.append(f"{pad}}}")
+            return lines
+        return [f"{pad}pane {' '.join(attributes)}"]
+
+    direction = "vertical" if node.direction == "right" else "horizontal"
+    lines = [
+        f'{pad}pane split_direction="{direction}" {{',
+        *render_kdl_node(node.first, indent + 4),
+    ]
+    second_lines = render_kdl_node(node.second, indent + 4)
+    if second_lines:
+        second_lines[0] = second_lines[0].replace(
+            "pane ", f'pane size="{ratio_text(node.ratio)}" ', 1
+        )
+    lines.extend(second_lines)
+    lines.append(f"{pad}}}")
+    return lines
+
+
+def render_kdl(tabs: list[Tab]) -> str:
+    lines = ["layout {"]
+    for index, tab in enumerate(tabs):
+        focus = " focus=true" if index == 0 else ""
+        lines.append(
+            f"    tab name={kdl_quote(tab.label)}{focus} hide_floating_panes=true {{"
+        )
+        lines.extend(
+            [
+                "        pane size=1 borderless=true {",
+                '            plugin location="zellij:tab-bar"',
+                "        }",
+                *render_kdl_node(tab.root, 8),
+                "        pane size=1 borderless=true {",
+                '            plugin location="zellij:status-bar"',
+                "        }",
+                "    }",
+            ]
+        )
+    default_cwd = leftmost(tabs[0].root).cwd
+    lines.extend(
+        [
+            "    new_tab_template {",
+            "        pane size=1 borderless=true {",
+            '            plugin location="zellij:tab-bar"',
+            "        }",
+            f"        pane cwd={kdl_quote(default_cwd)}",
+            "        pane size=1 borderless=true {",
+            '            plugin location="zellij:status-bar"',
+            "        }",
+            "    }",
+            "}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def encoded(value: str) -> str:
+    return base64.b64encode(value.encode()).decode()
+
+
+def structural_records(node: Node) -> Iterable[list[str]]:
+    if isinstance(node, Pane):
+        return
+    source = leftmost(node.first)
+    created = leftmost(node.second)
+    yield [
+        "SPLIT",
+        source.id,
+        created.id,
+        node.direction,
+        str(node.ratio),
+        encoded(created.cwd),
+    ]
+    yield from structural_records(node.first)
+    yield from structural_records(node.second)
+
+
+def render_herdr_records(tabs: list[Tab]) -> str:
+    records: list[list[str]] = []
+    for tab in tabs:
+        root = leftmost(tab.root)
+        records.append(["TAB", tab.id, encoded(tab.label), encoded(root.cwd), root.id])
+        records.extend(structural_records(tab.root))
+        for item in leaves(tab.root):
+            records.append(
+                [
+                    "PANE",
+                    item.id,
+                    encoded(item.label),
+                    encoded(item.cwd),
+                    encoded(json.dumps(item.command)),
+                    item.role,
+                ]
+            )
+    return "\n".join("\t".join(record) for record in records) + "\n"
+
+
+def render_contract(tabs: list[Tab]) -> str:
+    contract = {
+        "tabs": [
+            {
+                "id": tab.id,
+                "label": tab.label,
+                "panes": [
+                    {
+                        "id": item.id,
+                        "label": item.label,
+                        "cwd": item.cwd,
+                        "command": list(item.command),
+                        "role": item.role,
+                    }
+                    for item in leaves(tab.root)
+                ],
+            }
+            for tab in tabs
+        ]
+    }
+    return json.dumps(contract, indent=2, sort_keys=True) + "\n"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("format", choices=("kdl", "herdr", "contract"))
+    parser.add_argument("--workflow", required=True)
+    parser.add_argument("--project-config", required=True)
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--consumer-root")
+    parser.add_argument("--consumer-backend", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    root = str(Path(args.root).resolve())
+    consumer_root = str(Path(args.consumer_root or root).resolve())
+    try:
+        tabs = workspace_model(
+            args.workflow,
+            args.project_config,
+            root,
+            consumer_root,
+            args.consumer_backend,
+        )
+        validate(tabs)
+    except ValueError as exc:
+        print(f"wtup-layout: {exc}", file=sys.stderr)
+        return 2
+
+    if args.format == "kdl":
+        sys.stdout.write(render_kdl(tabs))
+    elif args.format == "herdr":
+        sys.stdout.write(render_herdr_records(tabs))
+    else:
+        sys.stdout.write(render_contract(tabs))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

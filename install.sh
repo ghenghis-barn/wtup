@@ -51,10 +51,13 @@ done
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 files=(
   wtup
-  wtup-herdr
   wtup-pane
   wtup-summary
   wtup-utility
+)
+internal_files=(
+  wtup-herdr
+  wtup-layout
 )
 
 mkdir -p "$bin_dir"
@@ -79,3 +82,34 @@ for file in "${files[@]}"; do
     echo "copied  $src -> $dst"
   fi
 done
+
+libexec_dir="$(dirname "$bin_dir")/libexec/wtup"
+mkdir -p "$libexec_dir"
+for file in "${internal_files[@]}"; do
+  src="${repo_dir}/libexec/${file}"
+  dst="${libexec_dir}/${file}"
+
+  if [[ ! -f "$src" ]]; then
+    echo "install.sh: missing internal source file: $src" >&2
+    exit 1
+  fi
+
+  rm -f "$dst"
+  if [[ "$mode" == "symlink" ]]; then
+    ln -s "$src" "$dst"
+    echo "linked  $dst -> $src"
+  else
+    cp "$src" "$dst"
+    chmod 755 "$dst"
+    echo "copied  $src -> $dst"
+  fi
+done
+
+legacy_helper="${bin_dir}/wtup-herdr"
+if [[ -L "$legacy_helper" ]]; then
+  legacy_target="$(readlink "$legacy_helper")"
+  if [[ "$legacy_target" == "${repo_dir}/wtup-herdr" || "$legacy_target" == "${repo_dir}/libexec/wtup-herdr" ]]; then
+    rm -f "$legacy_helper"
+    echo "removed legacy public helper $legacy_helper"
+  fi
+fi

@@ -91,7 +91,7 @@ run_helper() {
   WORKTREE_NAME=test \
   WORKTREE_HOST=test \
   WTUP_TERMINAL_BACKEND="${WTUP_TERMINAL_BACKEND:-none}" \
-  "$repo_root/wtup-herdr"
+  "$repo_root/libexec/wtup-herdr"
 }
 
 run_native() {
@@ -120,7 +120,7 @@ assert_log '^pane split w9:p1 --direction right --ratio 0.62 '
 assert_log '^pane run w9:p1 env .* wtup-utility$'
 assert_log '^pane run .* env .* wtup-pane app$'
 assert_log '^tab create --workspace w9 .*--label Nvim '
-assert_log '^workspace report-metadata w9 --source wtup --token wtup_layout=auto:frontend:1$'
+assert_log '^workspace report-metadata w9 --source wtup --token wtup_layout=auto:frontend:2$'
 assert_log '^workspace focus w9$'
 [[ ! -s "$tmp/zellij.log" ]] || fail "native mode invoked zellij"
 
@@ -182,6 +182,10 @@ WTUP_WORKSPACE_BACKEND=zellij \
 WTUP_PROJECT_CONFIG=frontend \
 "$repo_root/wtup" "$repo_root"
 rg -q -- '-s main -n ' "$tmp/zellij.log" || fail "legacy Zellij backend was not invoked"
+generated_kdl="$tmp/home/.cache/wtup/layouts/main.kdl"
+[[ -f "$generated_kdl" ]] || fail "canonical Zellij KDL was not generated"
+rg -q 'tab name="Dev"' "$generated_kdl" || fail "frontend tab was missing from canonical KDL"
+rg -q 'name="App".*cwd=' "$generated_kdl" || fail "app pane was missing from canonical KDL"
 
 WTUP_WORKFLOW=auto WTUP_PROJECT_CONFIG=fullstack run_helper
 assert_log '^tab rename w9:t1 Overview$'
@@ -213,5 +217,76 @@ run_helper
 assert_log '^tab create --workspace w9 .*--label Agents '
 assert_log '^agent start codex --kind codex --pane '
 assert_log '^pane run .* bash -ic exec custom-tool --watch$'
+
+verify_contract() {
+  local workflow="$1"
+  local project_config="$2"
+  local extra=()
+  local contract="$tmp/${workflow}-${project_config}.json"
+  local kdl="$tmp/${workflow}-${project_config}.kdl"
+
+  if [[ "${3:-}" == "backend" ]]; then
+    extra+=(--consumer-backend)
+  fi
+  "$repo_root/libexec/wtup-layout" contract \
+    --workflow "$workflow" \
+    --project-config "$project_config" \
+    --root "$repo_root" \
+    --consumer-root "$repo_root" \
+    "${extra[@]}" >"$contract"
+  "$repo_root/libexec/wtup-layout" kdl \
+    --workflow "$workflow" \
+    --project-config "$project_config" \
+    --root "$repo_root" \
+    --consumer-root "$repo_root" \
+    "${extra[@]}" >"$kdl"
+
+  python3 - "$contract" "$kdl" <<'PY'
+import json
+import sys
+
+contract = json.load(open(sys.argv[1], encoding="utf-8"))
+kdl = open(sys.argv[2], encoding="utf-8").read()
+for tab in contract["tabs"]:
+    assert f'name="{tab["label"]}"' in kdl, tab["label"]
+    for pane in tab["panes"]:
+        assert f'name="{pane["label"]}"' in kdl, pane["label"]
+        assert f'cwd="{pane["cwd"]}"' in kdl, pane["cwd"]
+        if pane["command"]:
+            assert f'command="{pane["command"][0]}"' in kdl, pane["command"]
+PY
+  if command -v zellij >/dev/null 2>&1; then
+    zellij setup --dump-layout "$kdl" >/dev/null
+  fi
+}
+
+verify_contract auto frontend
+verify_contract auto fullstack
+verify_contract component-only component-only
+verify_contract consumer-context consumer-context backend
+
+install_root="$tmp/install"
+"$repo_root/install.sh" --copy --bin-dir "$install_root/bin" >/dev/null
+[[ -x "$install_root/bin/wtup" ]] || fail "public wtup CLI was not installed"
+[[ ! -e "$install_root/bin/wtup-herdr" ]] || fail "internal Herdr backend was installed as a public CLI"
+[[ -x "$install_root/libexec/wtup/wtup-herdr" ]] || fail "Herdr backend was not installed under libexec"
+[[ -x "$install_root/libexec/wtup/wtup-layout" ]] || fail "canonical renderer was not installed under libexec"
+"$install_root/bin/wtup" --help >/dev/null 2>&1
+: >"$log"
+printf '1' >"$tmp/counter"
+PATH="$fake_bin:$install_root/bin:$PATH" \
+WTUP_TEST_HERDR_LOG="$log" \
+WTUP_TEST_COUNTER="$tmp/counter" \
+WTUP_TEST_ZELLIJ_LOG="$tmp/zellij.log" \
+WTUP_WORKSPACE_BACKEND=herdr \
+WTUP_TERMINAL_BACKEND=none \
+WTUP_PROJECT_CONFIG=frontend \
+HERDR_ENV=1 \
+HERDR_SOCKET_PATH="$tmp/herdr.sock" \
+HERDR_WORKSPACE_ID=w1 \
+HERDR_TAB_ID=w1:t1 \
+HERDR_PANE_ID=w1:p1 \
+"$install_root/bin/wtup" "$repo_root"
+assert_log '^tab rename w9:t1 Dev$'
 
 echo "wtup tests passed"
