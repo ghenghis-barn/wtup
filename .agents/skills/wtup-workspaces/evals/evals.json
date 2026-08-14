@@ -1,0 +1,46 @@
+{
+  "skill_name": "wtup-workspaces",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I am inside a Herdr pane in a linked git worktree. Running wtup . says the recorded layout is auto:frontend:1 but the current CLI expects auto:frontend:2. A teammate suggested forcing Zellij in this pane or deleting the workspace from the same shell. Produce a safe diagnosis and exact recovery/verification plan. Do not mutate anything.",
+      "expected_output": "A safe runbook that checks Herdr protocol/capability, rejects silent nested-Zellij fallback, explains linked-worktree cwd/path handling, requires reset from another workspace, and verifies the final layout token and idempotent refocus behavior.",
+      "files": [],
+      "expectations": [
+        "Requires running wtup --reset from a different workspace, not the target workspace itself.",
+        "Warns against silently forcing nested Zellij after detecting a Herdr compatibility or layout-state problem.",
+        "Checks Herdr protocol 17+ and the wtup_layout metadata token.",
+        "Explains that linked worktrees use the common repository root as Herdr cwd and the linked checkout as path.",
+        "Includes an idempotency check that a second launch focuses rather than duplicates tabs."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Plan a consumer-context wtup launch for an aurora-ui worktree plus a Vite consumer with an optional Python backend. We have seen Portless panes race into HTTPS/443, summaries claim http://*.localhost:1355, Vite stay on 5173, and uv fail because .venv already exists. Give preflight, launch, and observable verification steps while preserving an explicit WTUP_FRONTEND_RUN_COMMAND if one is configured.",
+      "expected_output": "A deterministic consumer-context launch plan using one explicit Portless proxy, consistent origin/CORS verification, framework-aware Vite binding for default scripts, opaque override handling, valid-venv reuse, and the canonical consumer contract.",
+      "files": [],
+      "expectations": [
+        "Starts one proxy before panes with explicit PORTLESS_PORT=1355 and PORTLESS_HTTPS=0 defaults.",
+        "Verifies summary routes, portless routes, and backend CORS use the same scheme and port.",
+        "Requires default Vite scripts to bind Portless HOST/PORT and not fall back to 5173.",
+        "Preserves WTUP_FRONTEND_RUN_COMMAND unchanged and assigns responsibility for framework flags to the override.",
+        "Reuses a valid .venv and uses uv venv --allow-existing only for missing or incomplete environments.",
+        "Verifies the consumer-context canonical contract, including optional backend behavior."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "We want to support a new native terminal workspace backend in wtup alongside Herdr and Zellij. Write an implementation design and acceptance checklist that keeps every wtup workspace shape consistent. Cover capability detection, existing-workspace attach/reset semantics, tools placement, stale or interrupted builds, and contract tests. Do not write code.",
+      "expected_output": "A backend-adapter design centered on libexec/wtup-layout, with complete lifecycle/idempotency semantics, fail-closed capability selection, separate tools policy, and parity tests for every canonical workflow.",
+      "files": [],
+      "expectations": [
+        "Uses libexec/wtup-layout as the single canonical topology rather than duplicating pane definitions.",
+        "Covers frontend, fullstack, component-only, and consumer-context with and without a consumer backend.",
+        "Defines capability detection that fails closed instead of silently choosing an incompatible backend.",
+        "Separates workspace shape from tools/agents terminal placement.",
+        "Defines metadata or equivalent states for attach, matching layout, missing layout, version mismatch, and interrupted building.",
+        "Includes linked-worktree cwd/path semantics and observable parity checks for tabs, panes, commands, CWDs, and routes."
+      ]
+    }
+  ]
+}
