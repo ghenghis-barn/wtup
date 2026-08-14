@@ -26,6 +26,8 @@
 - When launched inside WezTerm, keeps the workspace and tools in one WezTerm window: the current tab becomes the Zellij workspace and the tools open in a sibling tab.
 - Outside WezTerm, spawns `omp` and `codex` by default in the Windows Terminal tools window when available.
 - Tool commands are configurable through `WTUP_TOOL_COMMANDS` or the backward-compatible `WTUP_WT_COMMANDS`.
+- Starts one explicitly configured Portless proxy before panes launch. The
+  default origin is `http://<name>.localhost:1355`, avoiding privileged ports.
 
 ## Usage
 
@@ -72,8 +74,8 @@ Terminal windows.
 The native presets retain the existing process roles:
 
 - `fullstack`: `Overview`, `Services`, `Nvim`, and `Agents` tabs.
-- `frontend`: `Dev`, `Nvim`, and `Agents` tabs. The app pane continues to use
-  the existing package-manager/Astro-compatible dev-command detection.
+- `frontend`: `Dev`, `Nvim`, and `Agents` tabs. The app pane auto-detects
+  pnpm/yarn/bun/npm; Vite dev scripts bind to Portless's assigned host and port.
 - `component-only`: `Design System`, `Nvim`, and `Agents` tabs.
 - `consumer-context`: `Overview`, `Apps`, `Nvim`, and `Agents` tabs.
 
@@ -309,7 +311,9 @@ Use `--no-prompt` for headless runs and `--strict-workflow` to fail when repo/li
 - `WTUP_WORKSPACE_BACKEND=zellij` forces the legacy Zellij composition.
 - `WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*'` adds frontend auto-detection rules.
 - `WTUP_FULLSTACK_PROJECT_PATTERNS='*design_system_evolution*'` forces the fullstack preset before frontend matching.
-- `WTUP_FRONTEND_RUN_COMMAND="npm run dev"` overrides the app pane command for the frontend preset.
+- `WTUP_FRONTEND_RUN_COMMAND="npm run dev"` overrides the app pane command for the frontend preset; overrides run unchanged and own any framework-specific host/port flags.
+- `PORTLESS_PORT=2468` changes the proxy port started by `wtup`; the default is the unprivileged port `1355`.
+- `PORTLESS_HTTPS=1` enables TLS for that proxy and all generated route/CORS origins; the default is HTTP.
 - `WTUP_TERMINAL_BACKEND=herdr` uses the native Herdr `Agents` tab when the
   workspace backend is Herdr. `auto` is the default.
 - `WTUP_TERMINAL_BACKEND=wezterm` forces the WezTerm tools-tab backend on the

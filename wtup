@@ -183,8 +183,8 @@ ENVIRONMENT VARIABLES
                          fullstack preset before frontend matching.
     WTUP_FRONTEND_RUN_COMMAND
                          Command used by the frontend preset app pane.
-                         Default: auto-detect package manager, then run the dev
-                         script (pnpm/yarn/bun/npm)
+                         Default: auto-detect pnpm/yarn/bun/npm and run its dev
+                         script. Vite scripts receive Portless HOST/PORT flags.
 
   Zellij / layout
     WTUP_ZELLIJ_LAYOUT   Zellij layout name (file in ~/.config/zellij/layouts/).
@@ -215,9 +215,10 @@ ENVIRONMENT VARIABLES
     WTUP_WIN_USER        Windows username (used to locate settings.json).
                          Default: autodetected via cmd.exe %USERNAME%
 
-  Portless (consumed by pane scripts)
-    PORTLESS_PORT        Override proxy port (default: 1355)
-    PORTLESS_HTTPS       Set to 1/true to prefer https URLs in summaries
+  Portless
+    PORTLESS_PORT        Proxy port started by wtup (default: 1355)
+    PORTLESS_HTTPS       Proxy TLS mode. Values: 0/false or 1/true.
+                         Default: 0 (http://*.localhost:1355)
 
 EXAMPLES
   # Attach/create worktree based on local branch name
@@ -516,6 +517,46 @@ slugify() {
   printf '%s' "$input" |
     tr '[:upper:]' '[:lower:]' |
     sed -E 's/[^a-z0-9.]+/-/g; s/^-+//; s/-+$//; s/\.+/./g; s/^\.+//; s/\.+$//'
+}
+
+configure_portless_proxy() {
+  local proxy_port="${PORTLESS_PORT:-1355}"
+  local proxy_https="${PORTLESS_HTTPS:-0}"
+  local start_args
+
+  if ! [[ "$proxy_port" =~ ^[0-9]+$ ]] || (( proxy_port < 1 || proxy_port > 65535 )); then
+    echo "wtup: invalid PORTLESS_PORT: $proxy_port (expected 1-65535)" >&2
+    return 2
+  fi
+
+  case "$proxy_https" in
+    1|true)
+      proxy_https=1
+      ;;
+    0|false|"")
+      proxy_https=0
+      ;;
+    *)
+      echo "wtup: invalid PORTLESS_HTTPS: $proxy_https (expected 0/false or 1/true)" >&2
+      return 2
+      ;;
+  esac
+
+  if ! command -v portless >/dev/null 2>&1; then
+    echo "wtup: portless is required but was not found in PATH" >&2
+    return 1
+  fi
+
+  export PORTLESS_PORT="$proxy_port"
+  export PORTLESS_HTTPS="$proxy_https"
+  start_args=(proxy start --port "$proxy_port")
+  if [[ "$proxy_https" == "1" ]]; then
+    start_args+=(--https)
+  else
+    start_args+=(--no-tls)
+  fi
+
+  portless "${start_args[@]}" >/dev/null
 }
 
 flatten_worktree_name() {
@@ -1627,6 +1668,11 @@ if [[ "$workflow" == "consumer-context" ]]; then
   export AURORA_CONSUMER_WORKTREE_HOST="$consumer_host"
   export AURORA_CONSUMER_KIND="$consumer_detected_kind"
 fi
+
+# Start one explicitly configured proxy before any workspace panes are created.
+# Every pane inherits the same settings, so Portless never auto-starts a
+# competing default 443/TLS proxy.
+configure_portless_proxy
 
 if [[ "$workspace_backend" == "herdr" ]]; then
   if [[ -z "$herdr_workspace_id" || -z "$herdr_tab_id" || -z "$herdr_root_pane_id" ]]; then

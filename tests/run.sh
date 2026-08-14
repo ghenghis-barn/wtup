@@ -7,6 +7,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 fake_bin="$tmp/bin"
 log="$tmp/herdr.log"
+portless_log="$tmp/portless.log"
+package_log="$tmp/package.log"
+uv_log="$tmp/uv.log"
 mkdir -p "$fake_bin"
 
 cat >"$fake_bin/herdr" <<'SH'
@@ -76,6 +79,48 @@ printf '%s\n' "$*" >>"${WTUP_TEST_ZELLIJ_LOG:?}"
 SH
 chmod 755 "$fake_bin/zellij"
 
+cat >"$fake_bin/portless" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -n "${WTUP_TEST_PORTLESS_LOG:-}" ]]; then
+  printf 'PORTLESS_PORT=%s PORTLESS_HTTPS=%s FLEXPLORER_ALLOWED_ORIGINS=%s VITE_FLEXPLORER_API_ORIGIN=%s ARGS=%s\n' \
+    "${PORTLESS_PORT:-}" "${PORTLESS_HTTPS:-}" "${FLEXPLORER_ALLOWED_ORIGINS:-}" \
+    "${VITE_FLEXPLORER_API_ORIGIN:-}" "$*" >>"$WTUP_TEST_PORTLESS_LOG"
+fi
+
+if [[ "${WTUP_TEST_PORTLESS_RUN_CHILD:-0}" == "1" ]]; then
+  shift
+  HOST="${WTUP_TEST_CHILD_HOST:-127.0.0.1}" \
+    PORT="${WTUP_TEST_CHILD_PORT:-4321}" \
+    "$@"
+fi
+SH
+chmod 755 "$fake_bin/portless"
+
+cat >"$fake_bin/uv" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${WTUP_TEST_UV_LOG:?}"
+if [[ "${1:-}" == "venv" ]]; then
+  mkdir -p .venv/bin
+  printf ':' >.venv/bin/activate
+  printf '#!/usr/bin/env bash\nexit 0\n' >.venv/bin/python
+  chmod 755 .venv/bin/python
+fi
+SH
+chmod 755 "$fake_bin/uv"
+
+for package_manager in npm yarn pnpm bun; do
+  cat >"$fake_bin/$package_manager" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s %s | HOST=%s PORT=%s\n' \
+  "$(basename "$0")" "$*" "${HOST:-}" "${PORT:-}" >>"${WTUP_TEST_PACKAGE_LOG:?}"
+SH
+  chmod 755 "$fake_bin/$package_manager"
+done
+
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -120,6 +165,7 @@ run_native() {
   WTUP_TEST_ZELLIJ_LOG="$tmp/zellij.log" \
   WTUP_WORKSPACE_BACKEND="${WTUP_WORKSPACE_BACKEND:-herdr}" \
   WTUP_TERMINAL_BACKEND=none \
+  WTUP_TEST_PORTLESS_LOG="$portless_log" \
   WTUP_PROJECT_CONFIG=frontend \
   HERDR_ENV=1 \
   HERDR_SOCKET_PATH="$tmp/herdr.sock" \
@@ -130,8 +176,13 @@ run_native() {
 }
 
 run_native "$repo_root"
+[[ "$(wc -l <"$portless_log")" == "1" ]] ||
+  fail "wtup did not start exactly one proxy before pane creation"
+rg -q 'PORTLESS_PORT=1355 PORTLESS_HTTPS=0 .*ARGS=proxy start --port 1355 --no-tls$' "$portless_log" ||
+  fail "wtup did not start the documented unprivileged HTTP proxy"
+assert_log '^pane run .* env .*PORTLESS_PORT=1355 PORTLESS_HTTPS=0 .*wtup-pane app$'
 assert_log '^status client --json$'
-assert_log 'worktree open .*--path .*/wtup .*--json'
+assert_log "worktree open .*--path $repo_root .*--json"
 assert_log '^tab rename w9:t1 Dev$'
 assert_log '^pane split w9:p1 --direction right --ratio 0.62 '
 assert_log '^pane run w9:p1 env .* wtup-utility$'
@@ -222,6 +273,7 @@ HOME="$tmp/home" \
 WTUP_TEST_ZELLIJ_LOG="$tmp/zellij.log" \
 WTUP_TERMINAL_BACKEND=none \
 WTUP_WORKSPACE_BACKEND=zellij \
+WTUP_WORKTREE_HOST=main \
 WTUP_PROJECT_CONFIG=frontend \
 "$repo_root/wtup" "$repo_root"
 rg -q -- '-s main -n ' "$tmp/zellij.log" || fail "legacy Zellij backend was not invoked"
@@ -310,6 +362,114 @@ verify_contract auto frontend
 verify_contract auto fullstack
 verify_contract component-only component-only
 verify_contract consumer-context consumer-context backend
+
+for package_manager in npm yarn pnpm bun; do
+  app_dir="$tmp/vite-$package_manager"
+  mkdir -p "$app_dir"
+  printf '{"scripts":{"dev":"vite"}}\n' >"$app_dir/package.json"
+  case "$package_manager" in
+    npm) : >"$app_dir/package-lock.json" ;;
+    yarn) : >"$app_dir/yarn.lock" ;;
+    pnpm) : >"$app_dir/pnpm-lock.yaml" ;;
+    bun) : >"$app_dir/bun.lock" ;;
+  esac
+
+  : >"$package_log"
+  (
+    cd "$app_dir"
+    PATH="$fake_bin:$PATH" \
+    PORTLESS_PORT=1355 \
+    PORTLESS_HTTPS=0 \
+    WTUP_TEST_PORTLESS_RUN_CHILD=1 \
+    WTUP_TEST_CHILD_HOST=127.0.0.1 \
+    WTUP_TEST_CHILD_PORT=4321 \
+    WTUP_TEST_PACKAGE_LOG="$package_log" \
+    WORKTREE_NAME=test \
+    WORKTREE_HOST=test \
+    "$repo_root/wtup-pane" app
+  )
+  rg -q "^$package_manager run dev -- --host 127\\.0\\.0\\.1 --port 4321 --strictPort \\| HOST=127\\.0\\.0\\.1 PORT=4321$" "$package_log" ||
+    fail "$package_manager Vite dev script did not bind to Portless HOST/PORT"
+done
+
+non_vite_dir="$tmp/non-vite"
+mkdir -p "$non_vite_dir"
+printf '{"scripts":{"dev":"next dev"}}\n' >"$non_vite_dir/package.json"
+: >"$non_vite_dir/package-lock.json"
+: >"$package_log"
+(
+  cd "$non_vite_dir"
+  PATH="$fake_bin:$PATH" \
+  PORTLESS_PORT=1355 \
+  PORTLESS_HTTPS=0 \
+  WTUP_TEST_PORTLESS_RUN_CHILD=1 \
+  WTUP_TEST_PACKAGE_LOG="$package_log" \
+  WORKTREE_NAME=test \
+  WORKTREE_HOST=test \
+  "$repo_root/wtup-pane" app
+)
+rg -q '^npm run dev \| HOST=127\.0\.0\.1 PORT=4321$' "$package_log" ||
+  fail "non-Vite dev script received framework-specific arguments"
+
+: >"$portless_log"
+PATH="$fake_bin:$PATH" \
+PORTLESS_PORT=1355 \
+PORTLESS_HTTPS=0 \
+WTUP_FRONTEND_RUN_COMMAND='npm run custom -- --flag' \
+WTUP_TEST_PORTLESS_LOG="$portless_log" \
+WORKTREE_NAME=test \
+WORKTREE_HOST=test \
+"$repo_root/wtup-pane" app
+rg -q 'ARGS=test bash -lc exec npm run custom -- --flag$' "$portless_log" ||
+  fail "explicit frontend command override was changed"
+
+backend_dir="$tmp/backend"
+mkdir -p "$backend_dir/.venv/bin"
+printf 'example==1\n' >"$backend_dir/requirements.txt"
+printf ':' >"$backend_dir/.venv/bin/activate"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$backend_dir/.venv/bin/python"
+chmod 755 "$backend_dir/.venv/bin/python"
+sha256sum "$backend_dir/requirements.txt" | awk '{print $1}' >"$backend_dir/.venv/.wtup_requirements.sha256"
+: >"$uv_log"
+(
+  cd "$backend_dir"
+  PATH="$fake_bin:$PATH" \
+  PORTLESS_PORT=1355 \
+  PORTLESS_HTTPS=0 \
+  WTUP_TEST_UV_LOG="$uv_log" \
+  WORKTREE_NAME=test \
+  WORKTREE_HOST=test \
+  "$repo_root/wtup-pane" backend
+) >"$tmp/backend.out" 2>&1
+[[ ! -s "$uv_log" ]] || fail "valid existing venv invoked uv"
+rg -q '\[wtup\] backend: reusing venv \(\.venv\)' "$tmp/backend.out" ||
+  fail "valid existing venv reuse was not reported"
+
+origin_dir="$tmp/origin"
+mkdir -p "$origin_dir"
+: >"$portless_log"
+(
+  cd "$origin_dir"
+  PATH="$fake_bin:$PATH" \
+  PORTLESS_PORT=2468 \
+  PORTLESS_HTTPS=1 \
+  WTUP_TEST_PORTLESS_LOG="$portless_log" \
+  WORKTREE_NAME=test \
+  WORKTREE_HOST=test \
+  "$repo_root/wtup-pane" backend
+) >"$tmp/origin.out" 2>&1
+rg -q 'FLEXPLORER_ALLOWED_ORIGINS=https://test\.localhost:2468,https://storybook\.test\.localhost:2468 ' "$portless_log" ||
+  fail "backend CORS origins did not match the configured proxy"
+
+PATH="$fake_bin:$PATH" \
+PORTLESS_PORT=2468 \
+PORTLESS_HTTPS=1 \
+WORKTREE_NAME=test \
+WORKTREE_HOST=test \
+WTUP_PROJECT_CONFIG=frontend \
+"$repo_root/wtup-summary" >"$tmp/summary.out"
+rg -q '^  frontend  https://test\.localhost:2468$' "$tmp/summary.out" ||
+  fail "route summary did not match the configured proxy"
 
 install_root="$tmp/install"
 "$repo_root/install.sh" --copy --bin-dir "$install_root/bin" >/dev/null

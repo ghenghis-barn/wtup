@@ -137,10 +137,11 @@ if ! [[ "$proxy_port" =~ ^[0-9]+$ ]]; then
 fi
 
 tls=0
-if [[ "${PORTLESS_HTTPS:-}" == "1" ]] || [[ "${PORTLESS_HTTPS:-}" == "true" ]]; then
-  tls=1
-fi
-if [[ -f "$HOME/.portless/proxy.tls" ]] || [[ -f "/tmp/portless/proxy.tls" ]]; then
+if [[ -n "${PORTLESS_HTTPS+x}" ]]; then
+  if [[ "${PORTLESS_HTTPS}" == "1" ]] || [[ "${PORTLESS_HTTPS}" == "true" ]]; then
+    tls=1
+  fi
+elif [[ -f "$HOME/.portless/proxy.tls" ]] || [[ -f "/tmp/portless/proxy.tls" ]]; then
   tls=1
 fi
 

@@ -41,10 +41,11 @@ if ! [[ "$proxy_port" =~ ^[0-9]+$ ]]; then
 fi
 
 tls=0
-if [[ "${PORTLESS_HTTPS:-}" == "1" ]] || [[ "${PORTLESS_HTTPS:-}" == "true" ]]; then
-  tls=1
-fi
-if [[ -f "$HOME/.portless/proxy.tls" ]] || [[ -f "/tmp/portless/proxy.tls" ]]; then
+if [[ -n "${PORTLESS_HTTPS+x}" ]]; then
+  if [[ "${PORTLESS_HTTPS}" == "1" ]] || [[ "${PORTLESS_HTTPS}" == "true" ]]; then
+    tls=1
+  fi
+elif [[ -f "$HOME/.portless/proxy.tls" ]] || [[ -f "/tmp/portless/proxy.tls" ]]; then
   tls=1
 fi
 
@@ -74,28 +75,47 @@ ds_storybook_origin="$(fmt_origin "storybook.${ds_host}.localhost")"
 consumer_frontend_origin="$(fmt_origin "${consumer_host}.localhost")"
 consumer_backend_origin="$(fmt_origin "flexplorer-api.${consumer_host}.localhost")"
 
-resolve_frontend_run_command() {
-  if [[ -n "${WTUP_FRONTEND_RUN_COMMAND:-}" ]]; then
-    printf '%s' "${WTUP_FRONTEND_RUN_COMMAND}"
-    return
-  fi
-
+resolve_frontend_package_manager() {
   if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
-    printf 'pnpm run dev'
+    printf 'pnpm'
     return
   fi
 
   if [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
-    printf 'yarn dev'
+    printf 'yarn'
     return
   fi
 
   if [[ -f bun.lockb || -f bun.lock ]] && command -v bun >/dev/null 2>&1; then
-    printf 'bun run dev'
+    printf 'bun'
     return
   fi
 
-  printf 'npm run dev'
+  printf 'npm'
+}
+
+frontend_dev_script_uses_vite() {
+  command -v node >/dev/null 2>&1 || return 1
+  node -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const script = pkg.scripts?.dev;
+    if (typeof script !== "string") process.exit(1);
+    process.exit(/(^|[\s;&|()])(?:[^\s;&|()]+\/)?vite(?=$|[\s;&|()])/.test(script) ? 0 : 1);
+  ' >/dev/null 2>&1
+}
+
+run_frontend_dev_script() {
+  local package_manager
+  local command
+
+  package_manager="$(resolve_frontend_package_manager)"
+  command=("$package_manager" run dev)
+  if frontend_dev_script_uses_vite; then
+    command+=(-- --host "${HOST:-127.0.0.1}" --port "${PORT:?Portless did not assign PORT}" --strictPort)
+  fi
+
+  exec "${command[@]}"
 }
 
 escape_bash_double_quoted() {
@@ -127,8 +147,12 @@ case "$role" in
     fi
 
     if [[ -f requirements.txt ]]; then
-      echo "[wtup] backend: ensuring venv (.venv)" >&2
-      uv venv
+      if [[ -x .venv/bin/python && -f .venv/bin/activate ]]; then
+        echo "[wtup] backend: reusing venv (.venv)" >&2
+      else
+        echo "[wtup] backend: ensuring venv (.venv)" >&2
+        uv venv --allow-existing .venv
+      fi
       # shellcheck disable=SC1091
       source .venv/bin/activate
 
@@ -184,10 +208,16 @@ case "$role" in
       app_portless_host="$consumer_host"
       app_backend_origin="$consumer_backend_origin"
     fi
-    frontend_run_command="$(resolve_frontend_run_command)"
-    frontend_run_command="$(escape_bash_double_quoted "$frontend_run_command")"
+    if [[ -n "${WTUP_FRONTEND_RUN_COMMAND:-}" ]]; then
+      frontend_run_command="$(escape_bash_double_quoted "$WTUP_FRONTEND_RUN_COMMAND")"
+      VITE_FLEXPLORER_API_ORIGIN="$app_backend_origin" VITE_EXPLORER_API_ORIGIN="$app_backend_origin" \
+        exec portless "$app_portless_host" bash -lc "exec ${frontend_run_command}"
+    fi
     VITE_FLEXPLORER_API_ORIGIN="$app_backend_origin" VITE_EXPLORER_API_ORIGIN="$app_backend_origin" \
-      exec portless "$app_portless_host" bash -lc "exec ${frontend_run_command}"
+      exec portless "$app_portless_host" "$0" frontend-dev
+    ;;
+  frontend-dev)
+    run_frontend_dev_script
     ;;
   ds-storybook)
     if [[ -n "${AURORA_UI_WORKTREE:-}" && -d "${AURORA_UI_WORKTREE:-}" ]]; then
