@@ -310,6 +310,11 @@ Use `--no-prompt` for headless runs and `--strict-workflow` to fail when repo/li
 - `WTUP_FRONTEND_PROJECT_PATTERNS='*forged-realms*,*another-app*'` adds frontend auto-detection rules.
 - `WTUP_FULLSTACK_PROJECT_PATTERNS='*design_system_evolution*'` forces the fullstack preset before frontend matching.
 - `WTUP_FRONTEND_RUN_COMMAND="npm run dev"` overrides the app pane command for the frontend preset.
+- Every managed workspace exports `AGENT_BROWSER_SESSION=wtup-<WORKTREE_HOST>`
+  and clears `AGENT_BROWSER_AUTO_CONNECT`. Vercel `agent-browser` therefore
+  reuses one automation-only browser per workspace instead of attaching tabs to
+  an existing user Chrome session. Headed mode remains an explicit operator
+  choice because terminal-only and WSL sessions may not expose a display.
 - `WTUP_TERMINAL_BACKEND=herdr` uses the native Herdr `Agents` tab when the
   workspace backend is Herdr. `auto` is the default.
 - `WTUP_TERMINAL_BACKEND=wezterm` forces the WezTerm tools-tab backend on the

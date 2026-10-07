@@ -173,6 +173,12 @@ ENVIRONMENT VARIABLES
                          - frontend: single app pane + utility bash panes
                          If unset, wtup auto-detects based on the resolved
                          worktree and common repo path.
+    AGENT_BROWSER_SESSION
+                         Exported as wtup-<WORKTREE_HOST>. agent-browser uses
+                         this stable isolated session automatically.
+    AGENT_BROWSER_AUTO_CONNECT
+                         Cleared before workspace composition so agent-browser
+                         cannot attach to an already-running user Chrome session.
     WTUP_FRONTEND_PROJECT_PATTERNS
                          Comma-separated shell globs used for frontend auto-detection.
                          Matched against the worktree path, common repo path,
@@ -1602,6 +1608,8 @@ export WTUP_PROJECT_CONFIG="$wt_project_config"
 export WTUP_WORKFLOW="$workflow"
 export WTUP_ROOT="$wt_root"
 export WTUP_MANAGED_ENV=1
+export AGENT_BROWSER_SESSION="wtup-${wt_host}"
+unset AGENT_BROWSER_AUTO_CONNECT
 
 if [[ "$workflow" == "component-only" || "$workflow" == "consumer-context" ]]; then
   if [[ -z "$ds_channel" ]]; then
